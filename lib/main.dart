@@ -5,6 +5,7 @@ import 'package:erp/screens/order_screen.dart';
 import 'package:erp/screens/warehouse_screen.dart';
 import 'package:erp/screens/finance_screen.dart';
 import 'package:erp/screens/production_screen.dart';
+import 'package:erp/services/api_service.dart';
 import 'package:erp/widgets/resizable_panel.dart';
 
 void main() {
@@ -44,16 +45,28 @@ class MainERPContainer extends StatefulWidget {
 class _MainERPContainerState extends State<MainERPContainer> {
   int _activeMenuIndex = 0;
 
+  void _onNavigate(int index) {
+    setState(() {
+      _activeMenuIndex = index;
+    });
+  }
+
   // The lists of screens
-  final List<Widget> _screens = [
-    const ERPHomeDashboard(),
-    const InventoryScreen(),
-    const CustomerScreen(),
-    const OrderScreen(),
-    const WarehouseScreen(),
-    const FinanceScreen(),
-    const ProductionScreen(),
-  ];
+  late List<Widget> _screens;
+
+  @override
+  void initState() {
+    super.initState();
+    _screens = [
+      ERPHomeDashboard(onNavigate: _onNavigate),
+      const InventoryScreen(),
+      const CustomerScreen(),
+      const OrderScreen(),
+      const WarehouseScreen(),
+      const FinanceScreen(),
+      const ProductionScreen(),
+    ];
+  }
 
   final List<String> _menuLabels = [
     "首屏控制台",
@@ -278,151 +291,296 @@ class _MainERPContainerState extends State<MainERPContainer> {
         ),
         direction: Axis.horizontal,
         initialRatio: 0.20,
-        minSize: 180, // Allow sidebar to shrink/grow, supports both desktop and mobile
+        minSize: 180,
       ),
     );
   }
 }
 
-// Initial Landing Home/Dashboard Screen
-class ERPHomeDashboard extends StatelessWidget {
-  const ERPHomeDashboard({super.key});
+// Initial Landing Home/Dashboard Screen with Live Database Summaries and Click Navigation
+class ERPHomeDashboard extends StatefulWidget {
+  final Function(int) onNavigate;
+  const ERPHomeDashboard({super.key, required this.onNavigate});
+
+  @override
+  State<ERPHomeDashboard> createState() => _ERPHomeDashboardState();
+}
+
+class _ERPHomeDashboardState extends State<ERPHomeDashboard> {
+  bool _loading = true;
+
+  // Real database stats
+  int _totalStock = 0;
+  int _activeStockCount = 0;
+  int _inactiveStockCount = 0;
+
+  int _totalCustomers = 0;
+  int _buyersCount = 0;
+  int _sellersCount = 0;
+
+  int _completedOrders = 0;
+  int _ongoingOrders = 0;
+  int _todayOrders = 0;
+
+  int _todayDeliveredCount = 0;
+  int _pendingDeliveriesCount = 0;
+
+  double _totalTransactionAmount = 0.0;
+  double _totalPendingCollection = 0.0;
+  double _totalPendingInvoice = 0.0;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStats();
+  }
+
+  Future<void> _loadStats() async {
+    setState(() => _loading = true);
+    try {
+      // 1. Load products
+      final prods = await ApiService.getProducts(showOffShelf: true);
+      int tStock = 0;
+      int activeP = 0;
+      int inactiveP = 0;
+      for (var p in prods) {
+        tStock += (p["quantity"] as int);
+        if (p["status"] == "上架") {
+          activeP++;
+        } else {
+          inactiveP++;
+        }
+      }
+
+      // 2. Load customers
+      final custs = await ApiService.getCustomers();
+      int buyers = 0;
+      int sellers = 0;
+      for (var c in custs) {
+        if (c["type"] == "买家") {
+          buyers++;
+        } else {
+          sellers++;
+        }
+      }
+
+      // 3. Load orders
+      final ords = await ApiService.getOrders(showCompleted: true);
+      int compO = 0;
+      int ongO = 0;
+      int todayO = 0;
+      final todayStr = "${DateTime.now().year}-${DateTime.now().month.toString().padLeft(2, '0')}-${DateTime.now().day.toString().padLeft(2, '0')}";
+
+      for (var o in ords) {
+        if (o["status"] == "已完成") {
+          compO++;
+        } else {
+          ongO++;
+        }
+        if (o["order_date"] == todayStr) {
+          todayO++;
+        }
+      }
+
+      // 4. Load warehouse / deliveries
+      final delsView = await ApiService.getDeliveriesView(showAll: true);
+      int pendingD = 0;
+      int todayDel = 0;
+      for (var d in delsView) {
+        pendingD += (d["pending_quantity"] as int);
+      }
+      // Sum today deliveries from orders deep log
+      for (var o in ords) {
+        final details = await ApiService.getOrderDetails(o["id"]);
+        final delList = details["deliveries"] as List;
+        for (var d in delList) {
+          if (d["delivery_date"] == todayStr) {
+            todayDel += (d["quantity"] as int);
+          }
+        }
+      }
+
+      // 5. Load financials
+      final finsView = await ApiService.getFinancialsView(showAll: true);
+      double totalTx = 0.0;
+      double pendingColl = 0.0;
+      double pendingInv = 0.0;
+      for (var f in finsView) {
+        totalTx += (f["total_amount"] as double);
+        pendingColl += (f["pending_amount"] as double);
+        pendingInv += (f["pending_invoice_amount"] as double);
+      }
+
+      setState(() {
+        _totalStock = tStock;
+        _activeStockCount = activeP;
+        _inactiveStockCount = inactiveP;
+        _totalCustomers = custs.length;
+        _buyersCount = buyers;
+        _sellersCount = sellers;
+        _completedOrders = compO;
+        _ongoingOrders = ongO;
+        _todayOrders = todayO;
+        _pendingDeliveriesCount = pendingD;
+        _todayDeliveredCount = todayDel;
+        _totalTransactionAmount = totalTx;
+        _totalPendingCollection = pendingColl;
+        _totalPendingInvoice = pendingInv;
+      });
+    } catch (_) {}
+    setState(() => _loading = false);
+  }
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(24.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // Banner card
-          Card(
-            color: Colors.indigo[900],
-            elevation: 4,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            child: Padding(
-              padding: const EdgeInsets.all(24.0),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: const [
-                        Text(
-                          "欢迎使用高精密智能制造 ERP 生产控制总线",
-                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 20),
-                        ),
-                        SizedBox(height: 8),
-                        Text(
-                          "系统已成功连接本地高可用 PostgreSQL 数据库集群（cluster 16 main）。当前处于全功能免登管理员运行模式，已自动配置出入库限制阻断，和物理删除二阶段二次安全验证。在下方可一键查看模块拓扑。",
-                          style: TextStyle(color: Colors.white70, height: 1.5, fontSize: 13),
-                        ),
-                      ],
+    return Scaffold(
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Banner card
+            Card(
+              color: Colors.indigo[900],
+              elevation: 4,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              child: Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: const [
+                          Text(
+                            "欢迎使用高精密智能制造 ERP 生产控制总线",
+                            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 20),
+                          ),
+                          SizedBox(height: 8),
+                          Text(
+                            "系统已连接本地高可用 PostgreSQL 数据库。当前处于全功能免登运行模式，各模块之间已自动配置出入库平账校验及物理删除双重保护。点击下方模块即可切换到对应管理工作台页面。",
+                            style: TextStyle(color: Colors.white70, height: 1.5, fontSize: 13),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 16),
-                  const Icon(Icons.analytics, size: 72, color: Colors.blueAccent),
-                ],
+                    const SizedBox(width: 16),
+                    IconButton(
+                      icon: const Icon(Icons.sync_outlined, size: 48, color: Colors.blueAccent),
+                      onPressed: _loadStats,
+                      tooltip: "刷新全局数据库统计",
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-          const SizedBox(height: 24),
-          const Text("企业信息流交互总线图 (模块树 & 联动)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-          const SizedBox(height: 16),
-          // Interactive module cards
-          GridView.count(
-            crossAxisCount: MediaQuery.of(context).size.width > 900 ? 3 : 2,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            crossAxisSpacing: 16,
-            mainAxisSpacing: 16,
-            childAspectRatio: 1.5,
-            children: [
-              _buildMetricSummary(
-                context,
-                title: "库存货品管理 (Excel表格)",
-                desc: "商品编号自动生成及自定义修改。多格式工程图纸（PDF/DWG）一键预览。未完成订单时严格限制下架删除。",
-                icon: Icons.inventory_2,
-                color: Colors.indigo,
-              ),
-              _buildMetricSummary(
-                context,
-                title: "客群管理对账 (买家及卖家)",
-                desc: "多角色信息联动管理。与订单总线实时交互。查看该客户下单历史，统计并展示总成交、应收应付金额。",
-                icon: Icons.person_add,
-                color: Colors.orange,
-              ),
-              _buildMetricSummary(
-                context,
-                title: "订单生产总线 (双指标罗盘)",
-                desc: "采用双层同心圆环动态指示交付（外圆）与收付款（内圆）的各自进度。联动仓储、财务核销。",
-                icon: Icons.shopping_cart,
-                color: Colors.purple,
-              ),
-              _buildMetricSummary(
-                context,
-                title: "进出库分拨 (仓储实控)",
-                desc: "拉取订单内容。出库交付严格阻断超过待交及可用库存，修改交货实录时自动安全还原并对账库存。",
-                icon: Icons.local_shipping,
-                color: Colors.teal,
-              ),
-              _buildMetricSummary(
-                context,
-                title: "财务收支结算 (开票核销)",
-                desc: "核对订单付款流水，登记发票代码、扫描件（PDF/JPG）。账目全期支持明细修改与安全平账。",
-                icon: Icons.payment,
-                color: Colors.green,
-              ),
-              _buildMetricSummary(
-                context,
-                title: "排产与工艺调度 (二期预留)",
-                desc: "预留的高精密工艺、设备排班、OEE工时控制。Excel排期，并与原料库存及订单算料联动。",
-                icon: Icons.handyman,
-                color: Colors.brown,
-              ),
-            ],
-          ),
-        ],
+            const SizedBox(height: 24),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text("数据大屏工作台 (支持一击跳转)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                if (_loading) const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+              ],
+            ),
+            const SizedBox(height: 16),
+            // Interactive module cards
+            GridView.count(
+              crossAxisCount: MediaQuery.of(context).size.width > 900 ? 3 : 2,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              crossAxisSpacing: 16,
+              mainAxisSpacing: 16,
+              childAspectRatio: 1.4,
+              children: [
+                _buildClickableCard(
+                  title: "库存货品管理",
+                  subDetails: "总库存件数: $_totalStock\n在架商品数: $_activeStockCount\n下架隐藏数: $_inactiveStockCount",
+                  icon: Icons.inventory_2,
+                  color: Colors.indigo,
+                  onTap: () => widget.onNavigate(1),
+                ),
+                _buildClickableCard(
+                  title: "客群对账管理",
+                  subDetails: "总客户数量: $_totalCustomers\n其中买家: $_buyersCount 个\n其中供应商: $_sellersCount 个",
+                  icon: Icons.people,
+                  color: Colors.orange,
+                  onTap: () => widget.onNavigate(2),
+                ),
+                _buildClickableCard(
+                  title: "订单生产总线",
+                  subDetails: "进行中订单: $_ongoingOrders\n已结清完成: $_completedOrders\n今日新增量: $_todayOrders",
+                  icon: Icons.shopping_cart,
+                  color: Colors.purple,
+                  onTap: () => widget.onNavigate(3),
+                ),
+                _buildClickableCard(
+                  title: "进出库分拨对账",
+                  subDetails: "今日已交货: $_todayDeliveredCount 件\n未交付待处理: $_pendingDeliveriesCount 批次",
+                  icon: Icons.local_shipping,
+                  color: Colors.teal,
+                  onTap: () => widget.onNavigate(4),
+                ),
+                _buildClickableCard(
+                  title: "财务清账核销",
+                  subDetails: "总交易额: ￥${_totalTransactionAmount.toStringAsFixed(2)}\n待收付款: ￥${_totalPendingCollection.toStringAsFixed(2)}\n待开发票: ￥${_totalPendingInvoice.toStringAsFixed(2)}",
+                  icon: Icons.payment,
+                  color: Colors.green,
+                  onTap: () => widget.onNavigate(5),
+                ),
+                _buildClickableCard(
+                  title: "排产与工艺调度",
+                  subDetails: "二期排期预留模块\n冷镦成型、高温硫化车间\n设备负荷及 MRP 物料领用排班",
+                  icon: Icons.handyman,
+                  color: Colors.brown,
+                  onTap: () => widget.onNavigate(6),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _buildMetricSummary(BuildContext context, {required String title, required String desc, required IconData icon, required Color color}) {
+  Widget _buildClickableCard({required String title, required String subDetails, required IconData icon, required Color color, required VoidCallback onTap}) {
     return Card(
       elevation: 2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                CircleAvatar(
-                  backgroundColor: color.withOpacity(0.1),
-                  child: Icon(icon, color: color),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    title,
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  CircleAvatar(
+                    backgroundColor: color.withOpacity(0.1),
+                    child: Icon(icon, color: color, size: 20),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Expanded(
-              child: Text(
-                desc,
-                style: const TextStyle(fontSize: 12, color: Colors.grey, height: 1.4),
-                maxLines: 4,
-                overflow: TextOverflow.ellipsis,
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.black87),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const Icon(Icons.arrow_forward_ios, size: 12, color: Colors.grey),
+                ],
               ),
-            ),
-          ],
+              const SizedBox(height: 12),
+              Expanded(
+                child: Text(
+                  subDetails,
+                  style: const TextStyle(fontSize: 12, color: Colors.black54, height: 1.5, fontFamily: "monospace"),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

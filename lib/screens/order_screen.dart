@@ -21,6 +21,11 @@ class _OrderScreenState extends State<OrderScreen> {
   bool _showCompleted = false;
   final TextEditingController _searchController = TextEditingController();
 
+  // Advanced search states
+  bool _isAdvancedSearch = false;
+  final TextEditingController _advCustomerController = TextEditingController();
+  final TextEditingController _advProductController = TextEditingController();
+
   // Pickers for dialogs
   List<Map<String, dynamic>> _availableProducts = [];
   List<Map<String, dynamic>> _availableCustomers = [];
@@ -37,12 +42,25 @@ class _OrderScreenState extends State<OrderScreen> {
     try {
       final list = await ApiService.getOrders(
         showCompleted: _showCompleted,
-        search: _searchController.text.trim().isNotEmpty ? _searchController.text.trim() : null,
+        search: _isAdvancedSearch ? null : (_searchController.text.trim().isNotEmpty ? _searchController.text.trim() : null),
       );
+
+      Iterable<Map<String, dynamic>> filtered = list;
+      if (_isAdvancedSearch) {
+        final cust = _advCustomerController.text.trim().toLowerCase();
+        final prod = _advProductController.text.trim().toLowerCase();
+        if (cust.isNotEmpty) {
+          filtered = filtered.where((o) => o["customer_name"].toLowerCase().contains(cust));
+        }
+        if (prod.isNotEmpty) {
+          filtered = filtered.where((o) => o["product_name"].toLowerCase().contains(prod));
+        }
+      }
+
       setState(() {
-        _orders = list;
+        _orders = filtered.toList();
         if (_selectedOrder != null) {
-          final updated = list.cast<Map<String, dynamic>?>().firstWhere((o) => o?["id"] == _selectedOrder!["id"], orElse: () => null);
+          final updated = _orders.cast<Map<String, dynamic>?>().firstWhere((o) => o?["id"] == _selectedOrder!["id"], orElse: () => null);
           if (updated != null) {
             _selectedOrder = updated;
             _fetchDetails(updated["id"]);
@@ -395,6 +413,10 @@ class _OrderScreenState extends State<OrderScreen> {
         _buildConcentricProgress(
           deliveryPct: o["delivery_progress"],
           paymentPct: o["payment_progress"],
+          deliveredQty: (o["delivered_quantity"] as num?)?.toDouble() ?? 0.0,
+          totalQty: (o["quantity"] as num).toDouble(),
+          paidAmt: (o["paid_amount"] as num?)?.toDouble() ?? 0.0,
+          totalAmt: (o["total_amount"] as num).toDouble(),
         ),
         Text(o["order_date"]),
         Text(o["delivery_date"]),
@@ -411,17 +433,62 @@ class _OrderScreenState extends State<OrderScreen> {
         child: Row(
           children: [
             Expanded(
-              child: TextField(
-                controller: _searchController,
-                onChanged: (v) => _fetchOrders(),
-                decoration: InputDecoration(
-                  hintText: "按编号、客户、商品或规格检索订单...",
-                  prefixIcon: const Icon(Icons.search, size: 20),
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+              child: AnimatedCrossFade(
+                firstChild: TextField(
+                  controller: _searchController,
+                  onChanged: (v) => _fetchOrders(),
+                  decoration: InputDecoration(
+                    hintText: "按编号、客户、商品或规格检索订单...",
+                    prefixIcon: const Icon(Icons.search, size: 20),
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
                 ),
+                secondChild: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _advCustomerController,
+                        onChanged: (v) => _fetchOrders(),
+                        decoration: const InputDecoration(
+                          hintText: "按客户名检索",
+                          isDense: true,
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: _advProductController,
+                        onChanged: (v) => _fetchOrders(),
+                        decoration: const InputDecoration(
+                          hintText: "按商品名检索",
+                          isDense: true,
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                crossFadeState: _isAdvancedSearch ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+                duration: const Duration(milliseconds: 200),
               ),
+            ),
+            const SizedBox(width: 12),
+            TextButton.icon(
+              icon: Icon(_isAdvancedSearch ? Icons.close : Icons.tune),
+              label: Text(_isAdvancedSearch ? "普通" : "高级"),
+              onPressed: () {
+                setState(() {
+                  _isAdvancedSearch = !_isAdvancedSearch;
+                  _searchController.clear();
+                  _advCustomerController.clear();
+                  _advProductController.clear();
+                  _fetchOrders();
+                });
+              },
             ),
             const SizedBox(width: 12),
             Row(
@@ -521,6 +588,10 @@ class _OrderScreenState extends State<OrderScreen> {
                                     deliveryPct: _selectedOrderDetails!["delivery_progress"],
                                     paymentPct: _selectedOrderDetails!["payment_progress"],
                                     size: 80.0,
+                                    deliveredQty: (_selectedOrderDetails!["delivered_quantity"] as num?)?.toDouble() ?? 0.0,
+                                    totalQty: (_selectedOrderDetails!["quantity"] as num).toDouble(),
+                                    paidAmt: (_selectedOrderDetails!["paid_amount"] as num?)?.toDouble() ?? 0.0,
+                                    totalAmt: (_selectedOrderDetails!["total_amount"] as num).toDouble(),
                                   ),
                                   const SizedBox(height: 8),
                                   const Text("双同心圆进度指示", style: TextStyle(fontSize: 10, color: Colors.grey)),
@@ -620,46 +691,73 @@ class _OrderScreenState extends State<OrderScreen> {
     );
   }
 
-  Widget _buildConcentricProgress({required double deliveryPct, required double paymentPct, double size = 32.0}) {
+  Widget _buildConcentricProgress({
+    required double deliveryPct,
+    required double paymentPct,
+    double size = 32.0,
+    double? deliveredQty,
+    double? totalQty,
+    double? paidAmt,
+    double? totalAmt,
+  }) {
     // Standardize bounds
     final dPct = (deliveryPct / 100.0).clamp(0.0, 1.0);
     final pPct = (paymentPct / 100.0).clamp(0.0, 1.0);
 
-    return Container(
-      width: size,
-      height: size,
-      alignment: Alignment.center,
-      child: Stack(
+    final dQtyText = deliveredQty != null && totalQty != null
+        ? "${deliveredQty.toInt()} / ${totalQty.toInt()}"
+        : "${(deliveryPct).toStringAsFixed(0)}%";
+    final pAmtText = paidAmt != null && totalAmt != null
+        ? "￥${paidAmt.toStringAsFixed(2)} / ￥${totalAmt.toStringAsFixed(2)}"
+        : "${(paymentPct).toStringAsFixed(0)}%";
+
+    final tooltipMsg = "交付进度(外圆): $dQtyText (${deliveryPct.toStringAsFixed(1)}%)\n收付进度(内圆): $pAmtText (${paymentPct.toStringAsFixed(1)}%)";
+
+    return Tooltip(
+      message: tooltipMsg,
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E1E2F).withOpacity(0.95),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.blueAccent.withOpacity(0.5)),
+      ),
+      padding: const EdgeInsets.all(12),
+      textStyle: const TextStyle(color: Colors.white, fontSize: 12),
+      child: Container(
+        width: size,
+        height: size,
         alignment: Alignment.center,
-        children: [
-          // Outer circle for delivery progress (blue)
-          SizedBox(
-            width: size,
-            height: size,
-            child: CircularProgressIndicator(
-              value: dPct,
-              strokeWidth: size > 40 ? 5.0 : 3.0,
-              backgroundColor: Colors.blue.withOpacity(0.1),
-              color: Colors.blue,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // Outer circle for delivery progress (blue)
+            SizedBox(
+              width: size,
+              height: size,
+              child: CircularProgressIndicator(
+                value: dPct,
+                strokeWidth: size > 40 ? 5.0 : 3.0,
+                backgroundColor: Colors.blue.withOpacity(0.1),
+                color: Colors.blue,
+              ),
             ),
-          ),
-          // Inner circle for payment progress (red)
-          SizedBox(
-            width: size * 0.65,
-            height: size * 0.65,
-            child: CircularProgressIndicator(
-              value: pPct,
-              strokeWidth: size > 40 ? 4.0 : 2.5,
-              backgroundColor: Colors.red.withOpacity(0.1),
-              color: Colors.red,
+            // Inner circle for payment progress (red)
+            SizedBox(
+              width: size * 0.65,
+              height: size * 0.65,
+              child: CircularProgressIndicator(
+                value: pPct,
+                strokeWidth: size > 40 ? 4.0 : 2.5,
+                backgroundColor: Colors.red.withOpacity(0.1),
+                color: Colors.red,
+              ),
             ),
-          ),
-          if (size > 40)
-            Text(
-              "${(dPct * 100).toInt()}%",
-              style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
-            ),
-        ],
+            if (size > 40)
+              Text(
+                "${(dPct * 100).toInt()}%",
+                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
+              ),
+          ],
+        ),
       ),
     );
   }

@@ -2,7 +2,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-DATABASE_URL = "postgresql://erp_user:erp_password@localhost:5432/erp_db"
+DATABASE_URL = "postgresql://postgres:23711375@localhost:5432/postgres"
 
 engine = create_engine(
     DATABASE_URL,

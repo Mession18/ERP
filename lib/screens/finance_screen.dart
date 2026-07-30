@@ -20,6 +20,11 @@ class _FinanceScreenState extends State<FinanceScreen> {
   bool _showAll = false; // toggle completed orders
   final TextEditingController _searchController = TextEditingController();
 
+  // Advanced search states
+  bool _isAdvancedSearch = false;
+  final TextEditingController _advCustomerController = TextEditingController();
+  final TextEditingController _advProductController = TextEditingController();
+
   @override
   void initState() {
     super.initState();
@@ -31,10 +36,23 @@ class _FinanceScreenState extends State<FinanceScreen> {
     try {
       final list = await ApiService.getFinancialsView(
         showAll: _showAll,
-        search: _searchController.text.trim().isNotEmpty ? _searchController.text.trim() : null,
+        search: _isAdvancedSearch ? null : (_searchController.text.trim().isNotEmpty ? _searchController.text.trim() : null),
       );
+
+      Iterable<Map<String, dynamic>> filtered = list;
+      if (_isAdvancedSearch) {
+        final cust = _advCustomerController.text.trim().toLowerCase();
+        final prod = _advProductController.text.trim().toLowerCase();
+        if (cust.isNotEmpty) {
+          filtered = filtered.where((f) => f["customer_name"].toLowerCase().contains(cust));
+        }
+        if (prod.isNotEmpty) {
+          filtered = filtered.where((f) => f["product_name"].toLowerCase().contains(prod));
+        }
+      }
+
       setState(() {
-        _financialsView = list;
+        _financialsView = filtered.toList();
         if (_selectedItem != null) {
           final updated = list.cast<Map<String, dynamic>?>().firstWhere((f) => f?["order_id"] == _selectedItem!["order_id"], orElse: () => null);
           if (updated != null) {
@@ -465,17 +483,62 @@ class _FinanceScreenState extends State<FinanceScreen> {
         child: Row(
           children: [
             Expanded(
-              child: TextField(
-                controller: _searchController,
-                onChanged: (v) => _fetchFinancialsView(),
-                decoration: InputDecoration(
-                  hintText: "检索待收付款财务结算订单...",
-                  prefixIcon: const Icon(Icons.attach_money),
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+              child: AnimatedCrossFade(
+                firstChild: TextField(
+                  controller: _searchController,
+                  onChanged: (v) => _fetchFinancialsView(),
+                  decoration: InputDecoration(
+                    hintText: "检索待收付款财务结算订单...",
+                    prefixIcon: const Icon(Icons.attach_money),
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
                 ),
+                secondChild: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _advCustomerController,
+                        onChanged: (v) => _fetchFinancialsView(),
+                        decoration: const InputDecoration(
+                          hintText: "按客户名检索",
+                          isDense: true,
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: _advProductController,
+                        onChanged: (v) => _fetchFinancialsView(),
+                        decoration: const InputDecoration(
+                          hintText: "按商品名检索",
+                          isDense: true,
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                crossFadeState: _isAdvancedSearch ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+                duration: const Duration(milliseconds: 200),
               ),
+            ),
+            const SizedBox(width: 12),
+            TextButton.icon(
+              icon: Icon(_isAdvancedSearch ? Icons.close : Icons.tune),
+              label: Text(_isAdvancedSearch ? "普通" : "高级"),
+              onPressed: () {
+                setState(() {
+                  _isAdvancedSearch = !_isAdvancedSearch;
+                  _searchController.clear();
+                  _advCustomerController.clear();
+                  _advProductController.clear();
+                  _fetchFinancialsView();
+                });
+              },
             ),
             const SizedBox(width: 12),
             Row(

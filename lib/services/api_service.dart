@@ -4,130 +4,12 @@ import 'package:http/http.dart' as http;
 class ApiService {
   static const String baseUrl = "http://localhost:8000/api";
 
-  // Local fallbacks in case the server is offline or not started
-  static List<Map<String, dynamic>> _mockProducts = [
-    {
-      "id": 1,
-      "code": "PROD-0001",
-      "name": "高精度钢制螺丝",
-      "specs": "M8*20mm",
-      "quantity": 1250,
-      "image_url": "",
-      "remarks": "汽车引擎配件",
-      "design_images": ["https://picsum.photos/200/300"],
-      "process_info": "1. 选材：优质碳钢\n2. 冷镦成型\n3. 搓丝\n4. 热处理淬火\n5. 表面镀锌",
-      "status": "上架"
-    },
-    {
-      "id": 2,
-      "code": "PROD-0002",
-      "name": "密封橡胶圈",
-      "specs": "OD 45mm * ID 38mm",
-      "quantity": 500,
-      "image_url": "",
-      "remarks": "防水耐高温",
-      "design_images": [],
-      "process_info": "橡胶模压工艺，180度硫化10分钟",
-      "status": "上架"
-    },
-    {
-      "id": 3,
-      "code": "PROD-0003",
-      "name": "合金轴承",
-      "specs": "6204-2RS",
-      "quantity": 30,
-      "image_url": "",
-      "remarks": "静音级转动轴承",
-      "design_images": [],
-      "process_info": "高精密磨床精加工，装配双面橡胶密封圈",
-      "status": "下架"
-    }
-  ];
-
-  static List<Map<String, dynamic>> _mockCustomers = [
-    {
-      "id": 1,
-      "code": "CUST-0001",
-      "type": "买家",
-      "name": "上海机械制造集团",
-      "contact_person": "陆经理",
-      "contact_phone": "13912345678",
-      "address": "上海市浦东新区张江高科",
-      "logo_url": ""
-    },
-    {
-      "id": 2,
-      "code": "CUST-0002",
-      "type": "卖家",
-      "name": "江阴市精密模具钢厂",
-      "contact_person": "韩总",
-      "contact_phone": "13588889999",
-      "address": "江苏省江阴市工业园区8号",
-      "logo_url": ""
-    }
-  ];
-
-  static List<Map<String, dynamic>> _mockOrders = [
-    {
-      "id": 1,
-      "code": "ORD-0001",
-      "type": "销售",
-      "customer_id": 1,
-      "customer_name": "上海机械制造集团",
-      "product_id": 1,
-      "product_name": "高精度钢制螺丝",
-      "product_specs": "M8*20mm",
-      "quantity": 1000,
-      "unit_price": 2.50,
-      "total_amount": 2500.0,
-      "delivery_progress": 60.0,
-      "payment_progress": 40.0,
-      "order_date": "2024-05-10",
-      "delivery_date": "2024-05-25",
-      "status": "进行中"
-    },
-    {
-      "id": 2,
-      "code": "ORD-0002",
-      "type": "采购",
-      "customer_id": 2,
-      "customer_name": "江阴市精密模具钢厂",
-      "product_id": 2,
-      "product_name": "密封橡胶圈",
-      "product_specs": "OD 45mm * ID 38mm",
-      "quantity": 200,
-      "unit_price": 1.20,
-      "total_amount": 240.0,
-      "delivery_progress": 100.0,
-      "payment_progress": 100.0,
-      "order_date": "2024-04-12",
-      "delivery_date": "2024-04-20",
-      "status": "已完成"
-    }
-  ];
-
-  static List<Map<String, dynamic>> _mockDeliveries = [
-    {
-      "id": 1,
-      "order_id": 1,
-      "quantity": 600,
-      "delivery_date": "2024-05-14",
-      "remarks": "第一批送货600只"
-    }
-  ];
-
-  static List<Map<String, dynamic>> _mockFinancials = [
-    {
-      "id": 1,
-      "order_id": 1,
-      "amount": 1000.0,
-      "payment_date": "2024-05-12",
-      "invoice_no": "INV-2024051201",
-      "invoice_image_url": "",
-      "is_invoiced": true,
-      "remarks": "定金首笔"
-    }
-  ];
+  // Local fallbacks in case the server is offline or not started - Clean Slate for V1
+  static List<Map<String, dynamic>> _mockProducts = [];
+  static List<Map<String, dynamic>> _mockCustomers = [];
+  static List<Map<String, dynamic>> _mockOrders = [];
+  static List<Map<String, dynamic>> _mockDeliveries = [];
+  static List<Map<String, dynamic>> _mockFinancials = [];
 
   static bool isOnline = true;
 
@@ -587,32 +469,44 @@ class ApiService {
       } catch (_) {}
     }
 
-    // Fallback
-    Iterable<Map<String, dynamic>> filtered = _mockOrders;
-    if (!showCompleted) {
-      filtered = filtered.where((o) => o["status"] == "进行中");
-    }
-    if (search != null && search.isNotEmpty) {
-      final s = search.toLowerCase();
-      filtered = filtered.where((o) =>
-          o["code"].toLowerCase().contains(s) ||
-          o["customer_name"].toLowerCase().contains(s) ||
-          o["product_name"].toLowerCase().contains(s) ||
-          o["product_specs"].toLowerCase().contains(s));
-    }
-
-    return filtered.map((o) {
+    // Fallback refined completed orders filter
+    final List<Map<String, dynamic>> list = [];
+    for (var o in _mockOrders) {
       final int orderId = o["id"];
       final total = o["quantity"] * o["unit_price"];
       final delQty = _mockDeliveries.where((d) => d["order_id"] == orderId).fold<int>(0, (sum, d) => sum + (d["quantity"] as int));
       final paid = _mockFinancials.where((f) => f["order_id"] == orderId).fold<double>(0.0, (sum, f) => sum + (f["amount"] as double));
 
-      return {
-        ...o,
-        "delivery_progress": (o["quantity"] > 0 ? (delQty / o["quantity"] * 100) : 0.0),
-        "payment_progress": (total > 0 ? (paid / total * 100) : 0.0),
-      };
-    }).toList();
+      final pendingDelivery = o["quantity"] - delQty;
+      final pendingPayment = total - paid;
+      final isCompleted = (pendingDelivery <= 0) && (pendingPayment <= 0.01);
+
+      o["status"] = isCompleted ? "已完成" : "进行中";
+
+      if (!showCompleted && isCompleted) {
+        continue;
+      }
+
+      bool matches = true;
+      if (search != null && search.isNotEmpty) {
+        final s = search.toLowerCase();
+        matches = o["code"].toLowerCase().contains(s) ||
+            o["customer_name"].toLowerCase().contains(s) ||
+            o["product_name"].toLowerCase().contains(s) ||
+            o["product_specs"].toLowerCase().contains(s);
+      }
+
+      if (matches) {
+        list.add({
+          ...o,
+          "delivery_progress": (o["quantity"] > 0 ? (delQty / o["quantity"] * 100) : 0.0),
+          "payment_progress": (total > 0 ? (paid / total * 100) : 0.0),
+          "delivered_quantity": delQty,
+          "paid_amount": paid,
+        });
+      }
+    }
+    return list;
   }
 
   static Future<Map<String, dynamic>> getOrderDetails(int id) async {
@@ -816,39 +710,44 @@ class ApiService {
       } catch (_) {}
     }
 
-    // Fallback
-    Iterable<Map<String, dynamic>> filtered = _mockOrders;
-    if (!showAll) {
-      filtered = filtered.where((o) => o["status"] == "进行中");
-    }
-    if (search != null && search.isNotEmpty) {
-      final s = search.toLowerCase();
-      filtered = filtered.where((o) =>
-          o["code"].toLowerCase().contains(s) ||
-          o["customer_name"].toLowerCase().contains(s) ||
-          o["product_name"].toLowerCase().contains(s) ||
-          o["product_specs"].toLowerCase().contains(s));
-    }
-
-    return filtered.map((o) {
+    // Fallback refined delivery status completed filter
+    final List<Map<String, dynamic>> list = [];
+    for (var o in _mockOrders) {
       final int orderId = o["id"];
       final prod = _mockProducts.firstWhere((p) => p["id"] == o["product_id"]);
       final int delQty = _mockDeliveries.where((d) => d["order_id"] == orderId).fold<int>(0, (sum, d) => sum + (d["quantity"] as int));
       final int pending = o["quantity"] - delQty;
+      final bool isCompletedDelivery = (pending <= 0);
 
-      return {
-        "order_id": o["id"],
-        "order_code": o["code"],
-        "type": o["type"],
-        "customer_name": o["customer_name"],
-        "product_name": o["product_name"],
-        "product_specs": o["product_specs"],
-        "total_quantity": o["quantity"],
-        "delivered_quantity": delQty,
-        "pending_quantity": pending < 0 ? 0 : pending,
-        "stock_quantity": prod["quantity"]
-      };
-    }).toList();
+      if (!showAll && isCompletedDelivery) {
+        continue; // hide completed
+      }
+
+      bool matches = true;
+      if (search != null && search.isNotEmpty) {
+        final s = search.toLowerCase();
+        matches = o["code"].toLowerCase().contains(s) ||
+            o["customer_name"].toLowerCase().contains(s) ||
+            o["product_name"].toLowerCase().contains(s) ||
+            o["product_specs"].toLowerCase().contains(s);
+      }
+
+      if (matches) {
+        list.add({
+          "order_id": o["id"],
+          "order_code": o["code"],
+          "type": o["type"],
+          "customer_name": o["customer_name"],
+          "product_name": o["product_name"],
+          "product_specs": o["product_specs"],
+          "total_quantity": o["quantity"],
+          "delivered_quantity": delQty,
+          "pending_quantity": pending < 0 ? 0 : pending,
+          "stock_quantity": prod["quantity"]
+        });
+      }
+    }
+    return list;
   }
 
   static Future<void> createDelivery(Map<String, String> data) async {
@@ -1027,41 +926,46 @@ class ApiService {
       } catch (_) {}
     }
 
-    // Fallback
-    Iterable<Map<String, dynamic>> filtered = _mockOrders;
-    if (!showAll) {
-      filtered = filtered.where((o) => o["status"] == "进行中");
-    }
-    if (search != null && search.isNotEmpty) {
-      final s = search.toLowerCase();
-      filtered = filtered.where((o) =>
-          o["code"].toLowerCase().contains(s) ||
-          o["customer_name"].toLowerCase().contains(s) ||
-          o["product_name"].toLowerCase().contains(s) ||
-          o["product_specs"].toLowerCase().contains(s));
-    }
-
-    return filtered.map((o) {
+    // Fallback refined financial completed filter (pending amount == 0)
+    final List<Map<String, dynamic>> list = [];
+    for (var o in _mockOrders) {
       final int orderId = o["id"];
       final total = o["quantity"] * o["unit_price"];
+      final paid = _mockFinancials.where((f) => f["order_id"] == orderId).fold<double>(0.0, (sum, f) => sum + (f["amount"] as double));
+      final pendingAmount = total - paid;
+      final bool isCompletedFinance = (pendingAmount <= 0.01);
 
-      final paid = _mockFinancials.where((f) => f["order_id"] == orderId).fold(0.0, (sum, f) => sum + f["amount"]);
-      final invoiced = _mockFinancials.where((f) => f["order_id"] == orderId && f["is_invoiced"] == true).fold(0.0, (sum, f) => sum + f["amount"]);
+      if (!showAll && isCompletedFinance) {
+        continue; // hide completed
+      }
 
-      return {
-        "order_id": o["id"],
-        "order_code": o["code"],
-        "type": o["type"],
-        "customer_name": o["customer_name"],
-        "product_name": o["product_name"],
-        "product_specs": o["product_specs"],
-        "total_amount": total,
-        "paid_amount": paid,
-        "pending_amount": (total - paid) < 0 ? 0.0 : (total - paid),
-        "invoiced_amount": invoiced,
-        "pending_invoice_amount": (total - invoiced) < 0 ? 0.0 : (total - invoiced)
-      };
-    }).toList();
+      bool matches = true;
+      if (search != null && search.isNotEmpty) {
+        final s = search.toLowerCase();
+        matches = o["code"].toLowerCase().contains(s) ||
+            o["customer_name"].toLowerCase().contains(s) ||
+            o["product_name"].toLowerCase().contains(s) ||
+            o["product_specs"].toLowerCase().contains(s);
+      }
+
+      if (matches) {
+        final invoiced = _mockFinancials.where((f) => f["order_id"] == orderId && f["is_invoiced"] == true).fold<double>(0.0, (sum, f) => sum + (f["amount"] as double));
+        list.add({
+          "order_id": o["id"],
+          "order_code": o["code"],
+          "type": o["type"],
+          "customer_name": o["customer_name"],
+          "product_name": o["product_name"],
+          "product_specs": o["product_specs"],
+          "total_amount": total,
+          "paid_amount": paid,
+          "pending_amount": pendingAmount < 0 ? 0.0 : pendingAmount,
+          "invoiced_amount": invoiced,
+          "pending_invoice_amount": (total - invoiced) < 0 ? 0.0 : (total - invoiced)
+        });
+      }
+    }
+    return list;
   }
 
   static Future<void> createFinancialRecord(Map<String, String> data) async {
