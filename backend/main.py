@@ -456,24 +456,31 @@ def get_orders(
     search: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
-    query = db.query(Order)
-
-    if not show_completed:
-        query = query.filter(Order.status == "进行中")
-
-    orders = query.order_by(Order.code).all()
+    orders = db.query(Order).order_by(Order.code).all()
 
     result = []
     for o in orders:
         total_amount = o.quantity * o.unit_price
-
-        # In out progress
         del_qty = sum(d.quantity for d in o.deliveries)
-        delivery_progress = (del_qty / o.quantity * 100) if o.quantity > 0 else 0
-
-        # Financial progress
         paid_amount = sum(f.amount for f in o.financials)
+
+        delivery_progress = (del_qty / o.quantity * 100) if o.quantity > 0 else 0
         payment_progress = (paid_amount / total_amount * 100) if total_amount > 0 else 0
+
+        pending_delivery = o.quantity - del_qty
+        pending_payment = total_amount - paid_amount
+
+        # Orders: Completed when both pending delivery qty and pending financial balance are 0
+        is_completed = (pending_delivery <= 0) and (pending_payment <= 0.01)
+
+        new_status = "已完成" if is_completed else "进行中"
+        if o.status != new_status:
+            o.status = new_status
+            db.add(o)
+            db.commit()
+
+        if not show_completed and is_completed:
+            continue # hide completed
 
         # Check if the search filter is active
         match = True
@@ -502,7 +509,9 @@ def get_orders(
                 "payment_progress": payment_progress,
                 "order_date": o.order_date,
                 "delivery_date": o.delivery_date,
-                "status": o.status
+                "status": o.status,
+                "delivered_quantity": del_qty,
+                "paid_amount": paid_amount
             })
 
     return result
@@ -669,17 +678,16 @@ def get_deliveries_view(
     search: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
-    # This retrieves delivery status overview for all matching orders
-    query = db.query(Order)
-    if not show_all:
-        query = query.filter(Order.status == "进行中")
-
-    orders = query.all()
+    orders = db.query(Order).all()
     result = []
 
     for o in orders:
         del_qty = sum(d.quantity for d in o.deliveries)
         pending_qty = o.quantity - del_qty
+        is_completed_delivery = (pending_qty <= 0)
+
+        if not show_all and is_completed_delivery:
+            continue # hide completed
 
         match = True
         if search:
@@ -846,17 +854,18 @@ def get_financials_view(
     search: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
-    query = db.query(Order)
-    if not show_all:
-        query = query.filter(Order.status == "进行中")
-
-    orders = query.all()
+    orders = db.query(Order).all()
     result = []
 
     for o in orders:
         total_amount = o.quantity * o.unit_price
         paid_amount = sum(f.amount for f in o.financials)
         pending_amount = total_amount - paid_amount
+
+        is_completed_finance = (pending_amount <= 0.01)
+
+        if not show_all and is_completed_finance:
+            continue # hide completed
 
         invoiced_amount = sum(f.amount for f in o.financials if f.is_invoiced)
         pending_invoice_amount = total_amount - invoiced_amount
