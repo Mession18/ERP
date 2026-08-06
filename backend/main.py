@@ -35,7 +35,6 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 def read_root():
     return {"status": "ok", "message": "ERP Backend is running"}
 
-
 @app.get("/api")
 @app.get("/api/")
 def read_api_root():
