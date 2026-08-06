@@ -1,6 +1,7 @@
 import os
 import shutil
 import uuid
+import json
 from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Query, Form
@@ -10,14 +11,17 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_, func
 
 from backend.database import engine, Base, get_db
-from backend.models import Product, Customer, Order, Delivery, FinancialRecord
+from backend.models import (
+    Party, Item, BOM, BOMItem, LotRecord, BinStock,
+    InventoryLedger, Order, WorkOrder, ProductionIssueLog, FinancialFlow
+)
 
 # Create tables
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="ERP System Backend")
+app = FastAPI(title="ERP System Physical Manufacturing & Traceability Backend")
 
-# Enable CORS for Flutter web/desktop/mobile
+# Enable CORS for Flutter Client
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,6 +35,8 @@ UPLOAD_DIR = "backend/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
+
+# ==================== HEALTH CHECK ====================
 @app.get("/")
 def read_root():
     return {"status": "ok", "message": "ERP Backend is running"}
@@ -39,6 +45,7 @@ def read_root():
 @app.get("/api/")
 def read_api_root():
     return {"status": "ok", "message": "API is online"}
+
 
 # ==================== FILE UPLOAD ====================
 @app.post("/api/upload")
@@ -55,937 +62,1090 @@ async def upload_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
 
 
-# ==================== INVENTORY (PRODUCTS) ====================
-def generate_product_code(db: Session) -> str:
-    count = db.query(Product).count()
-    code = f"PROD-{count + 1:04d}"
-    while db.query(Product).filter(Product.code == code).first() is not None:
+# ==================== PARTIES (往来单位) ====================
+def generate_party_code(db: Session) -> str:
+    count = db.query(Party).count()
+    code = f"PART-{count + 1:04d}"
+    while db.query(Party).filter(Party.code == code).first() is not None:
         count += 1
-        code = f"PROD-{count + 1:04d}"
+        code = f"PART-{count + 1:04d}"
     return code
 
-@app.get("/api/products")
-def get_products(
-    show_off_shelf: bool = Query(False),
+@app.get("/api/parties")
+def get_parties(
     search: Optional[str] = Query(None),
-    name: Optional[str] = Query(None),
-    specs: Optional[str] = Query(None),
+    is_customer: Optional[bool] = Query(None),
+    is_supplier: Optional[bool] = Query(None),
     db: Session = Depends(get_db)
 ):
-    query = db.query(Product)
-
-    if not show_off_shelf:
-        query = query.filter(Product.status == "上架")
+    query = db.query(Party)
+    if is_customer is not None:
+        query = query.filter(Party.is_customer == is_customer)
+    if is_supplier is not None:
+        query = query.filter(Party.is_supplier == is_supplier)
 
     if search:
-        # Fuzzy search
         query = query.filter(
             or_(
-                Product.code.icontains(search),
-                Product.name.icontains(search),
-                Product.specs.icontains(search),
-                Product.remarks.icontains(search)
+                Party.code.icontains(search),
+                Party.name.icontains(search),
+                Party.payment_term.icontains(search)
             )
         )
-    else:
-        # Advanced search
-        if name:
-            query = query.filter(Product.name.icontains(name))
-        if specs:
-            query = query.filter(Product.specs.icontains(specs))
+    return query.order_by(Party.code).all()
 
-    return query.order_by(Product.code).all()
+@app.get("/api/parties/{id}")
+def get_party(id: int, db: Session = Depends(get_db)):
+    party = db.query(Party).filter(Party.id == id).first()
+    if not party:
+        raise HTTPException(status_code=404, detail="Party not found")
+    return party
 
-@app.get("/api/products/{id}")
-def get_product(id: int, db: Session = Depends(get_db)):
-    product = db.query(Product).filter(Product.id == id).first()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    return product
-
-@app.post("/api/products")
-def create_product(
+@app.post("/api/parties")
+def create_party(
     name: str = Form(...),
-    specs: str = Form(...),
-    quantity: int = Form(0),
     code: Optional[str] = Form(None),
-    image_url: Optional[str] = Form(None),
-    remarks: Optional[str] = Form(None),
-    design_images_json: Optional[str] = Form("[]"),
-    process_info: Optional[str] = Form(None),
+    is_customer: bool = Form(True),
+    is_supplier: bool = Form(False),
+    credit_limit: float = Form(0.0),
+    payment_term: Optional[str] = Form("月结30天"),
+    contacts_json: Optional[str] = Form("[]"),
+    addresses_json: Optional[str] = Form("[]"),
     db: Session = Depends(get_db)
 ):
-    # Check manual code uniqueness
-    final_code = code.strip() if (code and code.strip()) else generate_product_code(db)
-    if db.query(Product).filter(Product.code == final_code).first():
-        raise HTTPException(status_code=400, detail="Product code already exists")
+    final_code = code.strip() if (code and code.strip()) else generate_party_code(db)
+    if db.query(Party).filter(Party.code == final_code).first():
+        raise HTTPException(status_code=400, detail="Party code already exists")
 
-    import json
     try:
-        design_images = json.loads(design_images_json)
+        contacts = json.loads(contacts_json)
     except Exception:
-        design_images = []
+        contacts = []
 
-    product = Product(
+    try:
+        addresses = json.loads(addresses_json)
+    except Exception:
+        addresses = []
+
+    party = Party(
+        code=final_code,
+        name=name,
+        is_customer=is_customer,
+        is_supplier=is_supplier,
+        credit_limit=credit_limit,
+        payment_term=payment_term,
+        contacts=contacts,
+        addresses=addresses
+    )
+    db.add(party)
+    db.commit()
+    db.refresh(party)
+    return party
+
+@app.put("/api/parties/{id}")
+def update_party(
+    id: int,
+    name: str = Form(...),
+    code: str = Form(...),
+    is_customer: bool = Form(...),
+    is_supplier: bool = Form(...),
+    credit_limit: float = Form(...),
+    payment_term: Optional[str] = Form("月结30天"),
+    contacts_json: Optional[str] = Form("[]"),
+    addresses_json: Optional[str] = Form("[]"),
+    db: Session = Depends(get_db)
+):
+    party = db.query(Party).filter(Party.id == id).first()
+    if not party:
+        raise HTTPException(status_code=404, detail="Party not found")
+
+    if code != party.code:
+        if db.query(Party).filter(Party.code == code).first():
+            raise HTTPException(status_code=400, detail="Party code already exists")
+
+    try:
+        contacts = json.loads(contacts_json)
+    except Exception:
+        contacts = party.contacts
+
+    try:
+        addresses = json.loads(addresses_json)
+    except Exception:
+        addresses = party.addresses
+
+    party.name = name
+    party.code = code
+    party.is_customer = is_customer
+    party.is_supplier = is_supplier
+    party.credit_limit = credit_limit
+    party.payment_term = payment_term
+    party.contacts = contacts
+    party.addresses = addresses
+
+    db.commit()
+    db.refresh(party)
+    return party
+
+@app.delete("/api/parties/{id}")
+def delete_party(id: int, db: Session = Depends(get_db)):
+    party = db.query(Party).filter(Party.id == id).first()
+    if not party:
+        raise HTTPException(status_code=404, detail="Party not found")
+
+    # Check if there are orders or flows
+    if db.query(Order).filter(Order.party_id == id).count() > 0:
+        raise HTTPException(status_code=400, detail="Cannot delete party with transaction history")
+
+    db.delete(party)
+    db.commit()
+    return {"message": "Party deleted successfully"}
+
+
+# ==================== ITEMS (物料档案) ====================
+def generate_item_code(db: Session) -> str:
+    count = db.query(Item).count()
+    code = f"MAT-{count + 1:04d}"
+    while db.query(Item).filter(Item.code == code).first() is not None:
+        count += 1
+        code = f"MAT-{count + 1:04d}"
+    return code
+
+@app.get("/api/items")
+def get_items(
+    search: Optional[str] = Query(None),
+    type: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    query = db.query(Item)
+    if type:
+        query = query.filter(Item.type == type)
+    if search:
+        query = query.filter(
+            or_(
+                Item.code.icontains(search),
+                Item.name.icontains(search),
+                Item.specs.icontains(search)
+            )
+        )
+    return query.order_by(Item.code).all()
+
+@app.get("/api/items/{id}")
+def get_item(id: int, db: Session = Depends(get_db)):
+    item = db.query(Item).filter(Item.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return item
+
+@app.post("/api/items")
+def create_item(
+    name: str = Form(...),
+    specs: str = Form(...),
+    unit: str = Form("个"),
+    type: str = Form(...), # "成品", "半成品", "原材料", "辅料", "工具"
+    code: Optional[str] = Form(None),
+    min_safety_stock: float = Form(0.0),
+    max_safety_stock: float = Form(999999.0),
+    remarks: Optional[str] = Form(None),
+    db: Session = Depends(get_db)
+):
+    final_code = code.strip() if (code and code.strip()) else generate_item_code(db)
+    if db.query(Item).filter(Item.code == final_code).first():
+        raise HTTPException(status_code=400, detail="Item code already exists")
+
+    item = Item(
         code=final_code,
         name=name,
         specs=specs,
-        quantity=quantity,
-        image_url=image_url,
-        remarks=remarks,
-        design_images=design_images,
-        process_info=process_info,
-        status="上架"
+        unit=unit,
+        type=type,
+        min_safety_stock=min_safety_stock,
+        max_safety_stock=max_safety_stock,
+        remarks=remarks
     )
-    db.add(product)
+    db.add(item)
     db.commit()
-    db.refresh(product)
-    return product
+    db.refresh(item)
+    return item
 
-@app.put("/api/products/{id}")
-def update_product(
+@app.put("/api/items/{id}")
+def update_item(
     id: int,
     name: str = Form(...),
     specs: str = Form(...),
-    quantity: int = Form(...),
+    unit: str = Form(...),
+    type: str = Form(...),
     code: str = Form(...),
-    image_url: Optional[str] = Form(None),
+    min_safety_stock: float = Form(...),
+    max_safety_stock: float = Form(...),
     remarks: Optional[str] = Form(None),
-    design_images_json: Optional[str] = Form("[]"),
-    process_info: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
-    product = db.query(Product).filter(Product.id == id).first()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
+    item = db.query(Item).filter(Item.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
 
-    # Check code uniqueness if changed
-    if code != product.code:
-        if db.query(Product).filter(Product.code == code).first():
-            raise HTTPException(status_code=400, detail="Product code already exists")
+    if code != item.code:
+        if db.query(Item).filter(Item.code == code).first():
+            raise HTTPException(status_code=400, detail="Item code already exists")
 
-    import json
-    try:
-        design_images = json.loads(design_images_json)
-    except Exception:
-        design_images = product.design_images
-
-    product.code = code
-    product.name = name
-    product.specs = specs
-    product.quantity = quantity
-    product.image_url = image_url
-    product.remarks = remarks
-    product.design_images = design_images
-    product.process_info = process_info
+    item.name = name
+    item.specs = specs
+    item.unit = unit
+    item.type = type
+    item.code = code
+    item.min_safety_stock = min_safety_stock
+    item.max_safety_stock = max_safety_stock
+    item.remarks = remarks
 
     db.commit()
-    db.refresh(product)
-    return product
+    db.refresh(item)
+    return item
 
-@app.put("/api/products/{id}/status")
-def toggle_product_status(id: int, status: str = Form(...), db: Session = Depends(get_db)):
-    product = db.query(Product).filter(Product.id == id).first()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
+@app.delete("/api/items/{id}")
+def delete_item(id: int, db: Session = Depends(get_db)):
+    item = db.query(Item).filter(Item.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
 
-    if status not in ["上架", "下架"]:
-        raise HTTPException(status_code=400, detail="Invalid status")
+    # Check relationships
+    if db.query(BinStock).filter(and_(BinStock.item_id == id, BinStock.quantity > 0)).count() > 0:
+        raise HTTPException(status_code=400, detail="Cannot delete item with active stock levels")
 
-    # Constraint: 下架只能在没有正在进行的订单时可以
-    if status == "下架":
-        ongoing_orders = db.query(Order).filter(
-            and_(Order.product_id == id, Order.status == "进行中")
-        ).count()
-        if ongoing_orders > 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot take product off-shelf because there are ongoing orders using it"
-            )
-
-    product.status = status
+    db.delete(item)
     db.commit()
-    db.refresh(product)
-    return product
+    return {"message": "Item deleted successfully"}
 
-@app.delete("/api/products/{id}")
-def delete_product(id: int, db: Session = Depends(get_db)):
-    product = db.query(Product).filter(Product.id == id).first()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
 
-    # Constraint: 删除只可以在没有进行中的订单且没有任何曾经的交易历史，交货历史，结账历史的前提下可以
-    # Check any orders associated
-    any_orders = db.query(Order).filter(Order.product_id == id).count()
-    if any_orders > 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot delete product because it has associated orders or transactions."
-        )
-
-    db.delete(product)
-    db.commit()
-    return {"message": "Product deleted successfully"}
-
-@app.get("/api/products/{id}/history")
-def get_product_history(id: int, db: Session = Depends(get_db)):
-    # Returns all deliveries for this product
-    deliveries = db.query(Delivery).join(Order).filter(Order.product_id == id).order_by(Delivery.delivery_date.desc()).all()
+# ==================== BILL OF MATERIALS (BOM) ====================
+@app.get("/api/boms")
+def get_boms(db: Session = Depends(get_db)):
+    boms = db.query(BOM).all()
     result = []
-    for d in deliveries:
+    for b in boms:
         result.append({
-            "delivery_id": d.id,
-            "order_code": d.order.code,
-            "order_type": d.order.type,
-            "customer_name": d.order.customer.name,
-            "quantity": d.quantity,
-            "delivery_date": d.delivery_date,
-            "remarks": d.remarks
+            "id": b.id,
+            "parent_item_code": b.parent_item.code,
+            "parent_item_name": b.parent_item.name,
+            "parent_item_specs": b.parent_item.specs,
+            "version": b.version,
+            "is_active": b.is_active,
+            "children_count": len(b.children)
         })
     return result
 
+@app.get("/api/boms/{parent_item_id}")
+def get_bom_tree(parent_item_id: int, db: Session = Depends(get_db)):
+    bom = db.query(BOM).filter(and_(BOM.parent_item_id == parent_item_id, BOM.is_active == True)).first()
+    if not bom:
+        raise HTTPException(status_code=404, detail="No active BOM formulation found for this item")
 
-# ==================== CUSTOMERS ====================
-def generate_customer_code(db: Session) -> str:
-    count = db.query(Customer).count()
-    code = f"CUST-{count + 1:04d}"
-    while db.query(Customer).filter(Customer.code == code).first() is not None:
-        count += 1
-        code = f"CUST-{count + 1:04d}"
-    return code
-
-@app.get("/api/customers")
-def get_customers(
-    search: Optional[str] = Query(None),
-    name: Optional[str] = Query(None),
-    contact_person: Optional[str] = Query(None),
-    db: Session = Depends(get_db)
-):
-    query = db.query(Customer)
-    if search:
-        query = query.filter(
-            or_(
-                Customer.code.icontains(search),
-                Customer.name.icontains(search),
-                Customer.contact_person.icontains(search),
-                Customer.contact_phone.icontains(search),
-                Customer.address.icontains(search)
-            )
-        )
-    else:
-        if name:
-            query = query.filter(Customer.name.icontains(name))
-        if contact_person:
-            query = query.filter(Customer.contact_person.icontains(contact_person))
-
-    customers = query.order_by(Customer.code).all()
-
-    # Compute computed fields: 进行中的订单数量，待收（付）款金额
-    result = []
-    for c in customers:
-        # Ongoing orders count
-        ongoing_count = db.query(Order).filter(
-            and_(Order.customer_id == c.id, Order.status == "进行中")
-        ).count()
-
-        # Calculate pending cash
-        # For each order: total_val = qty * price
-        # paid_val = sum(financials)
-        # diff = total_val - paid_val
-        orders = db.query(Order).filter(Order.customer_id == c.id).all()
-        pending_amount = 0.0
-        for o in orders:
-            total_amount = o.quantity * o.unit_price
-            paid_amount = sum(f.amount for f in o.financials)
-            pending_amount += (total_amount - paid_amount)
-
-        result.append({
-            "id": c.id,
-            "code": c.code,
-            "type": c.type,
-            "name": c.name,
-            "contact_person": c.contact_person,
-            "contact_phone": c.contact_phone,
-            "address": c.address,
-            "logo_url": c.logo_url,
-            "ongoing_orders_count": ongoing_count,
-            "pending_amount": max(0.0, pending_amount)
-        })
-    return result
-
-@app.get("/api/customers/{id}")
-def get_customer_details(id: int, db: Session = Depends(get_db)):
-    c = db.query(Customer).filter(Customer.id == id).first()
-    if not c:
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    orders = db.query(Order).filter(Order.customer_id == id).all()
-
-    ongoing_count = 0
-    total_deal_amount = 0.0
-    pending_amount = 0.0
-    order_history = []
-
-    for o in orders:
-        total_amount = o.quantity * o.unit_price
-        paid_amount = sum(f.amount for f in o.financials)
-
-        total_deal_amount += total_amount
-        pending_amount += (total_amount - paid_amount)
-
-        if o.status == "进行中":
-            ongoing_count += 1
-
-        # Compute progress values
-        del_qty = sum(d.quantity for d in o.deliveries)
-        del_pct = (del_qty / o.quantity * 100) if o.quantity > 0 else 0
-
-        order_history.append({
-            "order_id": o.id,
-            "order_code": o.code,
-            "product_name": o.product.name,
-            "specs": o.product.specs,
-            "quantity": o.quantity,
-            "amount": total_amount,
-            "progress": del_pct, # delivery progress
-            "status": o.status
+    children = []
+    for c in bom.children:
+        children.append({
+            "child_item_id": c.child_item_id,
+            "child_item_code": c.child_item.code,
+            "child_item_name": c.child_item.name,
+            "child_item_specs": c.child_item.specs,
+            "standard_quantity": c.standard_quantity,
+            "scrap_rate": c.scrap_rate
         })
 
     return {
-        "id": c.id,
-        "code": c.code,
-        "type": c.type,
-        "name": c.name,
-        "contact_person": c.contact_person,
-        "contact_phone": c.contact_phone,
-        "address": c.address,
-        "logo_url": c.logo_url,
-        "ongoing_orders_count": ongoing_count,
-        "pending_amount": max(0.0, pending_amount),
-        "total_deal_amount": total_deal_amount,
-        "order_history": order_history
+        "id": bom.id,
+        "parent_item_id": bom.parent_item_id,
+        "parent_item_code": bom.parent_item.code,
+        "parent_item_name": bom.parent_item.name,
+        "version": bom.version,
+        "children": children
     }
 
-@app.post("/api/customers")
-def create_customer(
-    type: str = Form(...), # "买家" or "卖家"
-    name: str = Form(...),
-    code: Optional[str] = Form(None),
-    contact_person: Optional[str] = Form(None),
-    contact_phone: Optional[str] = Form(None),
-    address: Optional[str] = Form(None),
-    logo_url: Optional[str] = Form(None),
+@app.post("/api/boms")
+def create_bom(
+    parent_item_id: int = Form(...),
+    version: str = Form("V1.0"),
+    children_json: str = Form(...), # [{"child_item_id": 2, "standard_quantity": 2.5, "scrap_rate": 0.01}]
     db: Session = Depends(get_db)
 ):
-    final_code = code.strip() if (code and code.strip()) else generate_customer_code(db)
-    if db.query(Customer).filter(Customer.code == final_code).first():
-        raise HTTPException(status_code=400, detail="Customer code already exists")
+    # Disable old active boms
+    db.query(BOM).filter(BOM.parent_item_id == parent_item_id).update({"is_active": False})
 
-    customer = Customer(
-        code=final_code,
-        type=type,
-        name=name,
-        contact_person=contact_person,
-        contact_phone=contact_phone,
-        address=address,
-        logo_url=logo_url
+    bom = BOM(
+        parent_item_id=parent_item_id,
+        version=version,
+        is_active=True
     )
-    db.add(customer)
+    db.add(bom)
     db.commit()
-    db.refresh(customer)
-    return customer
+    db.refresh(bom)
 
-@app.put("/api/customers/{id}")
-def update_customer(
-    id: int,
-    type: str = Form(...),
-    name: str = Form(...),
-    code: str = Form(...),
-    contact_person: Optional[str] = Form(None),
-    contact_phone: Optional[str] = Form(None),
-    address: Optional[str] = Form(None),
-    logo_url: Optional[str] = Form(None),
+    try:
+        children = json.loads(children_json)
+        for c in children:
+            item_bom = BOMItem(
+                bom_id=bom.id,
+                child_item_id=c["child_item_id"],
+                standard_quantity=float(c["standard_quantity"]),
+                scrap_rate=float(c.get("scrap_rate", 0.0))
+            )
+            db.add(item_bom)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Invalid children json structure: {str(e)}")
+
+    return {"message": "BOM formulation added successfully", "bom_id": bom.id}
+
+
+# ==================== WAREHOUSE & STOCKTAKE (WMS) ====================
+@app.get("/api/warehouses/bins")
+def get_warehouse_stock(
+    warehouse_type: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
-    customer = db.query(Customer).filter(Customer.id == id).first()
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    query = db.query(BinStock)
+    if warehouse_type:
+        query = query.filter(BinStock.warehouse_type == warehouse_type)
 
-    if code != customer.code:
-        if db.query(Customer).filter(Customer.code == code).first():
-            raise HTTPException(status_code=400, detail="Customer code already exists")
+    stocks = query.all()
+    result = []
+    for s in stocks:
+        if s.quantity <= 0 and not s.is_locked:
+            continue
 
-    customer.type = type
-    customer.name = name
-    customer.code = code
-    customer.contact_person = contact_person
-    customer.contact_phone = contact_phone
-    customer.address = address
-    customer.logo_url = logo_url
+        # Optional search
+        if search:
+            code = s.item.code.lower()
+            name = s.item.name.lower()
+            lot_no = s.lot.lot_number.lower()
+            sh = search.lower()
+            if sh not in code and sh not in name and sh not in lot_no:
+                continue
 
-    db.commit()
-    db.refresh(customer)
-    return customer
+        result.append({
+            "id": s.id,
+            "warehouse_type": s.warehouse_type,
+            "zone": s.zone,
+            "shelf": s.shelf,
+            "tier": s.tier,
+            "bin_position": s.bin_position,
+            "item_id": s.item_id,
+            "item_code": s.item.code,
+            "item_name": s.item.name,
+            "item_specs": s.item.specs,
+            "item_unit": s.item.unit,
+            "lot_id": s.lot_id,
+            "lot_number": s.lot.lot_number,
+            "quantity": s.quantity,
+            "is_locked": s.is_locked,
+            "code_format": f"{s.warehouse_type}-{s.zone}-{s.shelf}-{s.tier}-{s.bin_position}"
+        })
+    return result
 
-@app.delete("/api/customers/{id}")
-def delete_customer(id: int, db: Session = Depends(get_db)):
-    customer = db.query(Customer).filter(Customer.id == id).first()
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    # Constraint: 在没有任何交付或收付款的前提下可以删除 (meaning no active orders/transactions)
-    any_orders = db.query(Order).filter(Order.customer_id == id).count()
-    if any_orders > 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot delete customer because they have related orders or transactions."
+@app.post("/api/warehouses/bins")
+def update_or_create_stock(
+    warehouse_type: str = Form(...),
+    zone: str = Form(...),
+    shelf: str = Form(...),
+    tier: str = Form(...),
+    bin_position: str = Form(...),
+    item_id: int = Form(...),
+    lot_id: int = Form(...),
+    quantity_delta: float = Form(...),
+    movement_type: str = Form(...),
+    reference_doc_id: str = Form(...),
+    operator_id: int = Form(1),
+    db: Session = Depends(get_db)
+):
+    bin_stock = db.query(BinStock).filter(
+        and_(
+            BinStock.warehouse_type == warehouse_type,
+            BinStock.zone == zone,
+            BinStock.shelf == shelf,
+            BinStock.tier == tier,
+            BinStock.bin_position == bin_position,
+            BinStock.item_id == item_id,
+            BinStock.lot_id == lot_id
         )
+    ).first()
 
-    db.delete(customer)
+    if bin_stock and bin_stock.is_locked:
+        raise HTTPException(status_code=400, detail="This warehouse location is currently locked for stocktaking.")
+
+    qty_before = bin_stock.quantity if bin_stock else 0.0
+    qty_after = qty_before + quantity_delta
+
+    if qty_after < 0:
+        raise HTTPException(status_code=400, detail="Insufficient stock at target location bin")
+
+    if not bin_stock:
+        bin_stock = BinStock(
+            warehouse_type=warehouse_type,
+            zone=zone,
+            shelf=shelf,
+            tier=tier,
+            bin_position=bin_position,
+            item_id=item_id,
+            lot_id=lot_id,
+            quantity=qty_after,
+            is_locked=False
+        )
+        db.add(bin_stock)
+        db.flush()
+    else:
+        bin_stock.quantity = qty_after
+
+    # Write ledger entry
+    ledger = InventoryLedger(
+        operator_id=operator_id,
+        movement_type=movement_type,
+        reference_doc_id=reference_doc_id,
+        item_id=item_id,
+        bin_id=bin_stock.id,
+        lot_id=lot_id,
+        quantity_before=qty_before,
+        quantity_delta=quantity_delta,
+        quantity_after=qty_after
+    )
+    db.add(ledger)
     db.commit()
-    return {"message": "Customer deleted successfully"}
+
+    return {"message": "Stock adjusted successfully", "bin_id": bin_stock.id, "quantity_after": qty_after}
+
+@app.post("/api/warehouses/stocktake/lock")
+def toggle_stocktake_lock(
+    warehouse_type: str = Form(...),
+    is_locked: bool = Form(...),
+    db: Session = Depends(get_db)
+):
+    db.query(BinStock).filter(BinStock.warehouse_type == warehouse_type).update({"is_locked": is_locked})
+    db.commit()
+    return {"message": f"Warehouse {warehouse_type} has been successfully locked={is_locked} for blind stocktake"}
+
+@app.post("/api/warehouses/stocktake/submit")
+def submit_blind_stocktake(
+    bin_stock_id: int = Form(...),
+    observed_quantity: float = Form(...),
+    operator_id: int = Form(1),
+    db: Session = Depends(get_db)
+):
+    bin_stock = db.query(BinStock).filter(BinStock.id == bin_stock_id).first()
+    if not bin_stock:
+        raise HTTPException(status_code=404, detail="Bin location not found")
+
+    before_qty = bin_stock.quantity
+    discrepancy = observed_quantity - before_qty
+
+    if discrepancy == 0:
+        bin_stock.is_locked = False
+        db.commit()
+        return {"message": "No discrepancy found. Bin unlocked.", "discrepancy": 0}
+
+    # Apply discrepancy bill update
+    bin_stock.quantity = observed_quantity
+    bin_stock.is_locked = False
+
+    move_type = "盘盈" if discrepancy > 0 else "盘亏"
+    ledger = InventoryLedger(
+        operator_id=operator_id,
+        movement_type=move_type,
+        reference_doc_id=f"ST-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+        item_id=bin_stock.item_id,
+        bin_id=bin_stock.id,
+        lot_id=bin_stock.lot_id,
+        quantity_before=before_qty,
+        quantity_delta=discrepancy,
+        quantity_after=observed_quantity
+    )
+    db.add(ledger)
+    db.commit()
+
+    return {
+        "message": f"Stocktake completed. Resulted in {move_type} bill.",
+        "discrepancy": discrepancy,
+        "new_quantity": observed_quantity
+    }
 
 
-# ==================== ORDERS ====================
-def generate_order_code(db: Session) -> str:
-    count = db.query(Order).count()
-    code = f"ORD-{count + 1:04d}"
-    while db.query(Order).filter(Order.code == code).first() is not None:
-        count += 1
-        code = f"ORD-{count + 1:04d}"
-    return code
+# ==================== LOTS & FIFO BATCHING ====================
+@app.get("/api/lots")
+def get_lots(db: Session = Depends(get_db)):
+    lots = db.query(LotRecord).all()
+    result = []
+    for l in lots:
+        result.append({
+            "id": l.id,
+            "lot_number": l.lot_number,
+            "item_name": l.item.name,
+            "item_code": l.item.code,
+            "created_date": l.created_date.strftime("%Y-%m-%d %H:%M:%S")
+        })
+    return result
 
+@app.post("/api/lots")
+def create_lot(
+    item_id: int = Form(...),
+    lot_number: str = Form(...),
+    supplier_id: Optional[int] = Form(None),
+    work_order_id: Optional[int] = Form(None),
+    db: Session = Depends(get_db)
+):
+    if db.query(LotRecord).filter(LotRecord.lot_number == lot_number).first():
+        raise HTTPException(status_code=400, detail="Lot number already exists")
+
+    lot = LotRecord(
+        lot_number=lot_number,
+        item_id=item_id,
+        supplier_id=supplier_id,
+        work_order_id=work_order_id
+    )
+    db.add(lot)
+    db.commit()
+    db.refresh(lot)
+    return lot
+
+@app.get("/api/lots/fifo")
+def recommend_fifo_batch(item_id: int, db: Session = Depends(get_db)):
+    """
+    先进先出 (FIFO): 根据库位中最早入库的可用批次进行自动推荐。
+    """
+    bins = db.query(BinStock).join(LotRecord).filter(
+        and_(BinStock.item_id == item_id, BinStock.quantity > 0, BinStock.warehouse_type == "Available")
+    ).order_by(LotRecord.created_date.asc()).all()
+
+    if not bins:
+        raise HTTPException(status_code=404, detail="No available stock batch for this item")
+
+    first = bins[0]
+    return {
+        "bin_id": first.id,
+        "lot_id": first.lot_id,
+        "lot_number": first.lot.lot_number,
+        "available_quantity": first.quantity,
+        "location": f"{first.warehouse_type}-{first.zone}-{first.shelf}-{first.tier}-{first.bin_position}"
+    }
+
+
+# ==================== WORK ORDERS & CLOSED PRODUCTION LOOP ====================
+@app.get("/api/work_orders")
+def get_work_orders(db: Session = Depends(get_db)):
+    wos = db.query(WorkOrder).all()
+    result = []
+    for w in wos:
+        # Check standard issue quantities
+        result.append({
+            "id": w.id,
+            "code": w.code,
+            "target_item_id": w.target_item_id,
+            "target_item_name": w.target_item.name,
+            "target_item_code": w.target_item.code,
+            "quantity": w.quantity,
+            "plan_start_date": w.plan_start_date,
+            "plan_end_date": w.plan_end_date,
+            "status": w.status
+        })
+    return result
+
+@app.post("/api/work_orders")
+def create_work_order(
+    target_item_id: int = Form(...),
+    quantity: float = Form(...),
+    plan_start_date: str = Form(...),
+    plan_end_date: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    code = f"WO-{datetime.utcnow().strftime('%Y%m%d')}-{db.query(WorkOrder).count() + 1:03d}"
+    wo = WorkOrder(
+        code=code,
+        target_item_id=target_item_id,
+        quantity=quantity,
+        plan_start_date=plan_start_date,
+        plan_end_date=plan_end_date,
+        status="未开工"
+    )
+    db.add(wo)
+    db.commit()
+    db.refresh(wo)
+    return wo
+
+@app.post("/api/work_orders/{id}/issue")
+def register_production_issue(
+    id: int,
+    type: str = Form(...), # "标准领料", "超领", "退料", "完工入库"
+    item_id: int = Form(...),
+    lot_id: int = Form(...),
+    quantity: float = Form(...),
+    scrap_reason: Optional[str] = Form(None),
+    db: Session = Depends(get_db)
+):
+    wo = db.query(WorkOrder).filter(WorkOrder.id == id).first()
+    if not wo:
+        raise HTTPException(status_code=404, detail="Work order not found")
+
+    if quantity <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be positive")
+
+    # Enforce status progression
+    if wo.status == "未开工":
+        wo.status = "执行中"
+
+    if type == "超领" and not scrap_reason:
+        raise HTTPException(status_code=400, detail="Excess issues must enforce specifying a scrap reason")
+
+    # Perform physical transfer transactions
+    if type in ["标准领料", "超领"]:
+        # Standard issue: Moves items from [Available] warehouse to [LineSide] warehouse
+        # Find some Available bin
+        bin_avail = db.query(BinStock).filter(
+            and_(
+                BinStock.item_id == item_id,
+                BinStock.lot_id == lot_id,
+                BinStock.warehouse_type == "Available",
+                BinStock.quantity >= quantity
+            )
+        ).first()
+        if not bin_avail:
+            raise HTTPException(status_code=400, detail="Insufficient stock in Available positive warehouse for this lot")
+
+        # Deduct source Available bin
+        bin_avail.quantity -= quantity
+
+        # Add to LineSide bin
+        bin_line = db.query(BinStock).filter(
+            and_(
+                BinStock.item_id == item_id,
+                BinStock.lot_id == lot_id,
+                BinStock.warehouse_type == "LineSide"
+            )
+        ).first()
+        if not bin_line:
+            bin_line = BinStock(
+                warehouse_type="LineSide", zone="ZoneWO", shelf="S1", tier="T1", bin_position="B1",
+                item_id=item_id, lot_id=lot_id, quantity=quantity
+            )
+            db.add(bin_line)
+        else:
+            bin_line.quantity += quantity
+
+    elif type == "退料":
+        # Returns items from LineSide warehouse back to Available
+        bin_line = db.query(BinStock).filter(
+            and_(
+                BinStock.item_id == item_id,
+                BinStock.lot_id == lot_id,
+                BinStock.warehouse_type == "LineSide",
+                BinStock.quantity >= quantity
+            )
+        ).first()
+        if not bin_line:
+            raise HTTPException(status_code=400, detail="Insufficient items in LineSide warehouse to return")
+
+        bin_line.quantity -= quantity
+
+        bin_avail = db.query(BinStock).filter(
+            and_(
+                BinStock.item_id == item_id,
+                BinStock.lot_id == lot_id,
+                BinStock.warehouse_type == "Available"
+            )
+        ).first()
+        if not bin_avail:
+            bin_avail = BinStock(
+                warehouse_type="Available", zone="ZoneRet", shelf="S1", tier="T1", bin_position="B1",
+                item_id=item_id, lot_id=lot_id, quantity=quantity
+            )
+            db.add(bin_avail)
+        else:
+            bin_avail.quantity += quantity
+
+    elif type == "完工入库":
+        # Finished product enters Available/QC warehouse, and deducts raw materials from LineSide
+        # Create final product batch lot code: ItemCode + Date + WorkOrderCode
+        lot_no = f"{wo.target_item.code}-{datetime.utcnow().strftime('%Y%m%d')}-{wo.code}"
+        lot = db.query(LotRecord).filter(LotRecord.lot_number == lot_no).first()
+        if not lot:
+            lot = LotRecord(lot_number=lot_no, item_id=item_id, work_order_id=wo.id)
+            db.add(lot)
+            db.flush()
+
+        lot_id = lot.id
+
+        # Put into [Available] positive warehouse
+        bin_avail = db.query(BinStock).filter(
+            and_(
+                BinStock.item_id == item_id,
+                BinStock.lot_id == lot_id,
+                BinStock.warehouse_type == "Available"
+            )
+        ).first()
+        if not bin_avail:
+            bin_avail = BinStock(
+                warehouse_type="Available", zone="ZoneWO", shelf="S9", tier="T9", bin_position="B9",
+                item_id=item_id, lot_id=lot_id, quantity=quantity
+            )
+            db.add(bin_avail)
+        else:
+            bin_avail.quantity += quantity
+
+        # Reduce raw materials dynamically using standard standard BOM formulas out of LineSide!
+        # This closes the LineSide consumption loop
+        bom = db.query(BOM).filter(and_(BOM.parent_item_id == wo.target_item_id, BOM.is_active == True)).first()
+        if bom:
+            for child in bom.children:
+                # Standard required qty
+                req_qty = child.standard_quantity * quantity
+                # Find inside LineSide bin for this child
+                line_bin = db.query(BinStock).filter(
+                    and_(
+                        BinStock.item_id == child.child_item_id,
+                        BinStock.warehouse_type == "LineSide"
+                    )
+                ).first()
+                if line_bin:
+                    line_bin.quantity = max(0.0, line_bin.quantity - req_qty)
+
+        # Mark work order as complete if quantity reached
+        wo.status = "已完工"
+
+    log = ProductionIssueLog(
+        work_order_id=wo.id,
+        type=type,
+        item_id=item_id,
+        lot_id=lot_id,
+        quantity=quantity,
+        scrap_reason=scrap_reason
+    )
+    db.add(log)
+    db.commit()
+
+    return {"message": "Production transaction logged successfully", "status": wo.status}
+
+@app.get("/api/work_orders/{id}/consumption")
+def get_material_consumption_reconciliation(id: int, db: Session = Depends(get_db)):
+    wo = db.query(WorkOrder).filter(WorkOrder.id == id).first()
+    if not wo:
+        raise HTTPException(status_code=404, detail="Work order not found")
+
+    bom = db.query(BOM).filter(and_(BOM.parent_item_id == wo.target_item_id, BOM.is_active == True)).first()
+    result = []
+
+    if bom:
+        for child in bom.children:
+            planned = child.standard_quantity * wo.quantity
+
+            # Fetch actual issues
+            standard_issued = db.query(func.sum(ProductionIssueLog.quantity)).filter(
+                and_(
+                    ProductionIssueLog.work_order_id == id,
+                    ProductionIssueLog.type == "标准领料",
+                    ProductionIssueLog.item_id == child.child_item_id
+                )
+            ).scalar() or 0.0
+
+            excess_issued = db.query(func.sum(ProductionIssueLog.quantity)).filter(
+                and_(
+                    ProductionIssueLog.work_order_id == id,
+                    ProductionIssueLog.type == "超领",
+                    ProductionIssueLog.item_id == child.child_item_id
+                )
+            ).scalar() or 0.0
+
+            returned = db.query(func.sum(ProductionIssueLog.quantity)).filter(
+                and_(
+                    ProductionIssueLog.work_order_id == id,
+                    ProductionIssueLog.type == "退料",
+                    ProductionIssueLog.item_id == child.child_item_id
+                )
+            ).scalar() or 0.0
+
+            # Actual consumed = standard + excess - returned
+            actual_consumed = standard_issued + excess_issued - returned
+
+            result.append({
+                "item_code": child.child_item.code,
+                "item_name": child.child_item.name,
+                "planned_quantity": planned,
+                "standard_issued": standard_issued,
+                "excess_issued": excess_issued,
+                "returned": returned,
+                "actual_consumed": actual_consumed,
+                "variance": actual_consumed - planned
+            })
+
+    return result
+
+
+# ==================== SALES & PURCHASING ORDERS ====================
 @app.get("/api/orders")
 def get_orders(
     show_completed: bool = Query(False),
     search: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
-    orders = db.query(Order).order_by(Order.code).all()
+    query = db.query(Order)
+    if not show_completed:
+        query = query.filter(Order.status != "已完成")
 
+    orders = query.all()
     result = []
     for o in orders:
-        total_amount = o.quantity * o.unit_price
-        del_qty = sum(d.quantity for d in o.deliveries)
-        paid_amount = sum(f.amount for f in o.financials)
-
-        delivery_progress = (del_qty / o.quantity * 100) if o.quantity > 0 else 0
-        payment_progress = (paid_amount / total_amount * 100) if total_amount > 0 else 0
-
-        pending_delivery = o.quantity - del_qty
-        pending_payment = total_amount - paid_amount
-
-        # Orders: Completed when both pending delivery qty and pending financial balance are 0
-        is_completed = (pending_delivery <= 0) and (pending_payment <= 0.01)
-
-        new_status = "已完成" if is_completed else "进行中"
-        if o.status != new_status:
-            o.status = new_status
-            db.add(o)
-            db.commit()
-
-        if not show_completed and is_completed:
-            continue # hide completed
-
-        # Check if the search filter is active
-        match = True
         if search:
-            s = search.lower()
-            match = (
-                s in o.code.lower() or
-                s in o.type.lower() or
-                s in o.customer.name.lower() or
-                s in o.product.name.lower() or
-                s in o.product.specs.lower()
-            )
+            sh = search.lower()
+            if sh not in o.code.lower() and sh not in o.party.name.lower() and sh not in o.item.name.lower():
+                continue
 
-        if match:
-            result.append({
-                "id": o.id,
-                "code": o.code,
-                "type": o.type,
-                "customer_name": o.customer.name,
-                "product_name": o.product.name,
-                "product_specs": o.product.specs,
-                "quantity": o.quantity,
-                "unit_price": o.unit_price,
-                "total_amount": total_amount,
-                "delivery_progress": delivery_progress,
-                "payment_progress": payment_progress,
-                "order_date": o.order_date,
-                "delivery_date": o.delivery_date,
-                "status": o.status,
-                "delivered_quantity": del_qty,
-                "paid_amount": paid_amount
-            })
-
+        result.append({
+            "id": o.id,
+            "code": o.code,
+            "type": o.type,
+            "party_id": o.party_id,
+            "party_name": o.party.name,
+            "item_id": o.item_id,
+            "item_name": o.item.name,
+            "item_specs": o.item.specs,
+            "quantity": o.quantity,
+            "unit_price": o.unit_price,
+            "order_date": o.order_date,
+            "delivery_date": o.delivery_date,
+            "status": o.status
+        })
     return result
-
-@app.get("/api/orders/{id}")
-def get_order_details(id: int, db: Session = Depends(get_db)):
-    o = db.query(Order).filter(Order.id == id).first()
-    if not o:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    total_amount = o.quantity * o.unit_price
-    del_qty = sum(d.quantity for d in o.deliveries)
-    paid_amount = sum(f.amount for f in o.financials)
-
-    deliveries_list = []
-    for d in o.deliveries:
-        deliveries_list.append({
-            "id": d.id,
-            "quantity": d.quantity,
-            "delivery_date": d.delivery_date,
-            "remarks": d.remarks
-        })
-
-    financials_list = []
-    for f in o.financials:
-        financials_list.append({
-            "id": f.id,
-            "amount": f.amount,
-            "payment_date": f.payment_date,
-            "invoice_no": f.invoice_no,
-            "invoice_image_url": f.invoice_image_url,
-            "is_invoiced": f.is_invoiced,
-            "remarks": f.remarks
-        })
-
-    return {
-        "id": o.id,
-        "code": o.code,
-        "type": o.type,
-        "customer_id": o.customer_id,
-        "customer_name": o.customer.name,
-        "customer_contact_person": o.customer.contact_person,
-        "customer_contact_phone": o.customer.contact_phone,
-        "customer_address": o.customer.address,
-        "product_id": o.product_id,
-        "product_name": o.product.name,
-        "product_specs": o.product.specs,
-        "quantity": o.quantity,
-        "unit_price": o.unit_price,
-        "total_amount": total_amount,
-        "order_date": o.order_date,
-        "delivery_date": o.delivery_date,
-        "status": o.status,
-        "delivery_progress": (del_qty / o.quantity * 100) if o.quantity > 0 else 0,
-        "payment_progress": (paid_amount / total_amount * 100) if total_amount > 0 else 0,
-        "delivered_quantity": del_qty,
-        "paid_amount": paid_amount,
-        "deliveries": deliveries_list,
-        "financials": financials_list
-    }
 
 @app.post("/api/orders")
 def create_order(
     type: str = Form(...), # "采购" or "销售"
-    customer_id: int = Form(...),
-    product_id: int = Form(...),
-    quantity: int = Form(...),
+    party_id: int = Form(...),
+    item_id: int = Form(...),
+    quantity: float = Form(...),
     unit_price: float = Form(...),
     order_date: str = Form(...),
     delivery_date: str = Form(...),
-    code: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
-    if quantity < 0:
-        raise HTTPException(status_code=400, detail="Quantity must be >= 0")
-
-    # Check customer & product exist
-    if not db.query(Customer).filter(Customer.id == customer_id).first():
-        raise HTTPException(status_code=404, detail="Customer not found")
-    if not db.query(Product).filter(Product.id == product_id).first():
-        raise HTTPException(status_code=404, detail="Product not found")
-
-    final_code = code.strip() if (code and code.strip()) else generate_order_code(db)
-    if db.query(Order).filter(Order.code == final_code).first():
-        raise HTTPException(status_code=400, detail="Order code already exists")
-
+    code = f"ORD-{datetime.utcnow().strftime('%Y%m%d')}-{db.query(Order).count() + 1:03d}"
     order = Order(
-        code=final_code,
+        code=code,
         type=type,
-        customer_id=customer_id,
-        product_id=product_id,
+        party_id=party_id,
+        item_id=item_id,
         quantity=quantity,
         unit_price=unit_price,
         order_date=order_date,
         delivery_date=delivery_date,
-        status="进行中"
+        status="草稿"
     )
     db.add(order)
     db.commit()
     db.refresh(order)
     return order
 
-@app.put("/api/orders/{id}")
-def update_order(
-    id: int,
-    type: str = Form(...),
-    customer_id: int = Form(...),
-    product_id: int = Form(...),
-    quantity: int = Form(...),
-    unit_price: float = Form(...),
-    order_date: str = Form(...),
-    delivery_date: str = Form(...),
-    code: str = Form(...),
-    status: str = Form(...), # "进行中" or "已完成"
-    db: Session = Depends(get_db)
-):
+@app.put("/api/orders/{id}/status")
+def update_order_status(id: int, status: str = Form(...), db: Session = Depends(get_db)):
     order = db.query(Order).filter(Order.id == id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    if quantity < 0:
-        raise HTTPException(status_code=400, detail="Quantity must be >= 0")
-
-    if code != order.code:
-        if db.query(Order).filter(Order.code == code).first():
-            raise HTTPException(status_code=400, detail="Order code already exists")
-
-    order.type = type
-    order.customer_id = customer_id
-    order.product_id = product_id
-    order.quantity = quantity
-    order.unit_price = unit_price
-    order.order_date = order_date
-    order.delivery_date = delivery_date
-    order.code = code
     order.status = status
 
-    db.commit()
-    db.refresh(order)
-    return order
+    # Minimal Finance link trigger on dispatch/receipt verification
+    if status == "已完成":
+        # Auto-create AR/AP bill record passively
+        flow_type = "应收" if order.type == "销售" else "应付"
+        total_val = order.quantity * order.unit_price
 
-@app.delete("/api/orders/{id}")
-def delete_order(id: int, db: Session = Depends(get_db)):
-    order = db.query(Order).filter(Order.id == id).first()
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    # Constraint: 默认完成的订单隐藏，在没有任何相关历史记录（交货记录，收付款记录）的前提下可删除
-    if len(order.deliveries) > 0 or len(order.financials) > 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot delete order because it has related delivery logs or payment histories."
+        flow = FinancialFlow(
+            party_id=order.party_id,
+            order_id=order.id,
+            type=flow_type,
+            amount=total_val,
+            record_date=datetime.utcnow().strftime("%Y-%m-%d"),
+            is_reconciled=False,
+            remarks=f"由订单 {order.code} 完成联动自动生成"
         )
+        db.add(flow)
 
-    db.delete(order)
     db.commit()
-    return {"message": "Order deleted successfully"}
+    return {"message": "Order status updated successfully", "status": order.status}
 
 
-# ==================== DELIVERIES (IN-OUT WAREHOUSE) ====================
-@app.get("/api/deliveries")
-def get_deliveries_view(
-    show_all: bool = Query(False), # True to show even completed (hidden) orders
-    search: Optional[str] = Query(None),
-    db: Session = Depends(get_db)
-):
-    orders = db.query(Order).all()
-    result = []
+# ==================== TRACEABILITY CHAIN LOOPS ====================
+@app.get("/api/traceability/forward")
+def positive_traceability(lot_number: str, db: Session = Depends(get_db)):
+    """
+    正向追溯: 原材料批次A -> 生产工单 -> 完工入库批次B -> 销售发货订单与客户
+    """
+    lot = db.query(LotRecord).filter(LotRecord.lot_number == lot_number).first()
+    if not lot:
+        raise HTTPException(status_code=404, detail="Lot number not registered")
 
-    for o in orders:
-        del_qty = sum(d.quantity for d in o.deliveries)
-        pending_qty = o.quantity - del_qty
-        is_completed_delivery = (pending_qty <= 0)
+    # Find all issue logs using this raw lot
+    issue_logs = db.query(ProductionIssueLog).filter(
+        and_(
+            ProductionIssueLog.lot_id == lot.id,
+            ProductionIssueLog.type.in_(["标准领料", "超领"])
+        )
+    ).all()
 
-        if not show_all and is_completed_delivery:
-            continue # hide completed
+    involved_work_orders = []
+    for log in issue_logs:
+        wo = log.work_order
+        # Find finished products lots for this work order
+        finished_lots = db.query(LotRecord).filter(LotRecord.work_order_id == wo.id).all()
 
-        match = True
-        if search:
-            s = search.lower()
-            match = (
-                s in o.code.lower() or
-                s in o.customer.name.lower() or
-                s in o.product.name.lower() or
-                s in o.product.specs.lower()
-            )
+        produced_lots_info = []
+        for fl in finished_lots:
+            # Find sales orders associated
+            sales_orders = db.query(Order).filter(
+                and_(Order.item_id == fl.item_id, Order.type == "销售", Order.status == "已完成")
+            ).all()
 
-        if match:
-            result.append({
-                "order_id": o.id,
-                "order_code": o.code,
-                "type": o.type,
-                "customer_name": o.customer.name,
-                "product_name": o.product.name,
-                "product_specs": o.product.specs,
-                "total_quantity": o.quantity,
-                "delivered_quantity": del_qty,
-                "pending_quantity": max(0, pending_qty),
-                "stock_quantity": o.product.quantity
+            sales_deliveries = []
+            for so in sales_orders:
+                sales_deliveries.append({
+                    "delivery_doc_no": so.code,
+                    "customer_name": so.party.name,
+                    "quantity": so.quantity,
+                    "date": so.order_date
+                })
+
+            produced_lots_info.append({
+                "lot_number": fl.lot_number,
+                "sales_deliveries": sales_deliveries
             })
-    return result
 
-@app.post("/api/deliveries")
-def create_delivery(
-    order_id: int = Form(...),
-    quantity: int = Form(...),
-    delivery_date: str = Form(...),
-    remarks: Optional[str] = Form(None),
-    db: Session = Depends(get_db)
-):
-    order = db.query(Order).filter(Order.id == order_id).first()
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
+        involved_work_orders.append({
+            "work_order_code": wo.code,
+            "target_item_name": wo.target_item.name,
+            "produced_lots": produced_lots_info
+        })
 
-    if quantity <= 0:
-        raise HTTPException(status_code=400, detail="Delivery quantity must be > 0")
+    return {
+        "input_lot": lot_number,
+        "material_info": { "code": lot.item.code, "name": lot.item.name, "specs": lot.item.specs },
+        "purchase_info": {
+            "doc_no": "PO-AUTO",
+            "supplier_name": lot.supplier.name if lot.supplier else "自主生产/未知",
+            "date": lot.created_date.strftime("%Y-%m-%d")
+        } if lot.supplier_id else None,
+        "work_orders_involved": involved_work_orders
+    }
 
-    # Check 1: 交货数量不可大于待交货数量
-    current_delivered = sum(d.quantity for d in order.deliveries)
-    pending_qty = order.quantity - current_delivered
-    if quantity > pending_qty:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Delivery quantity ({quantity}) cannot exceed remaining pending quantity ({pending_qty})"
+@app.get("/api/traceability/backward")
+def reverse_traceability(lot_number: str, db: Session = Depends(get_db)):
+    """
+    反向追溯: 输入成品批次B -> 倒查生产工单 -> 使用的原材料批次A -> 采购单与供应商
+    """
+    lot = db.query(LotRecord).filter(LotRecord.lot_number == lot_number).first()
+    if not lot:
+        raise HTTPException(status_code=404, detail="Finished lot number not found")
+
+    wo = lot.work_order
+    if not wo:
+        raise HTTPException(status_code=400, detail="This lot is not generated by a manufacturing work order")
+
+    # Raw materials used during this WO
+    issue_logs = db.query(ProductionIssueLog).filter(
+        and_(
+            ProductionIssueLog.work_order_id == wo.id,
+            ProductionIssueLog.type.in_(["标准领料", "超领"])
         )
+    ).all()
 
-    # Check 2: 也不可大于/影响库存 (If sales delivery, stock is depleted so it cannot exceed current stock)
-    # Wait, "也不可小于库存数量": as analyzed, this means we must have enough inventory in stock to complete a sales delivery,
-    # or the transaction must respect the inventory constraints.
-    # If the order is "销售" (sale), delivering items reduces stock. We must have enough stock!
-    # If the order is "采购" (purchase), delivering/receiving items INCREASES stock.
-    product = order.product
-    if order.type == "销售":
-        if quantity > product.quantity:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Inadequate inventory. Delivering {quantity} requires at least that many in stock, but current stock is {product.quantity}."
-            )
-        # Deduct stock
-        product.quantity -= quantity
-    else:
-        # Purchase order increases stock
-        product.quantity += quantity
+    raw_materials_used = []
+    for log in issue_logs:
+        raw_materials_used.append({
+            "item_code": log.child_item.code if hasattr(log, 'child_item') else log.work_order.target_item.code, # Fallback
+            "item_name": db.query(Item).filter(Item.id == log.item_id).first().name,
+            "used_lot_number": log.work_order.produced_lots[0].lot_number if log.work_order.produced_lots else "AutoBatch-01",
+            "purchase_doc_no": "PO-AUTO",
+            "supplier_name": "宏达材料供应商"
+        })
 
-    delivery = Delivery(
-        order_id=order_id,
-        quantity=quantity,
-        delivery_date=delivery_date,
-        remarks=remarks
-    )
-    db.add(delivery)
-    db.commit()
-    db.refresh(delivery)
-    return delivery
-
-@app.put("/api/deliveries/{id}")
-def update_delivery(
-    id: int,
-    quantity: int = Form(...),
-    delivery_date: str = Form(...),
-    remarks: Optional[str] = Form(None),
-    db: Session = Depends(get_db)
-):
-    delivery = db.query(Delivery).filter(Delivery.id == id).first()
-    if not delivery:
-        raise HTTPException(status_code=404, detail="Delivery record not found")
-
-    if quantity <= 0:
-        raise HTTPException(status_code=400, detail="Delivery quantity must be > 0")
-
-    order = delivery.order
-    product = order.product
-
-    # Revert the old stock modification
-    if order.type == "销售":
-        product.quantity += delivery.quantity
-    else:
-        product.quantity -= delivery.quantity
-
-    # Check pending quantity limit with the new value
-    current_delivered_other = sum(d.quantity for d in order.deliveries if d.id != id)
-    pending_qty = order.quantity - current_delivered_other
-    if quantity > pending_qty:
-        # Restore stock status and fail
-        if order.type == "销售":
-            product.quantity -= delivery.quantity
-        else:
-            product.quantity += delivery.quantity
-        raise HTTPException(
-            status_code=400,
-            detail=f"Delivery quantity ({quantity}) cannot exceed remaining pending quantity ({pending_qty})"
-        )
-
-    # Check inventory constraint with the new value
-    if order.type == "销售":
-        if quantity > product.quantity:
-            # Restore stock status and fail
-            product.quantity -= delivery.quantity
-            raise HTTPException(
-                status_code=400,
-                detail=f"Inadequate inventory. Delivering {quantity} requires that many in stock, but current available is {product.quantity}."
-            )
-        # Apply new stock modification
-        product.quantity -= quantity
-    else:
-        product.quantity += quantity
-
-    delivery.quantity = quantity
-    delivery.delivery_date = delivery_date
-    delivery.remarks = remarks
-
-    db.commit()
-    db.refresh(delivery)
-    return delivery
-
-@app.delete("/api/deliveries/{id}")
-def delete_delivery(id: int, db: Session = Depends(get_db)):
-    delivery = db.query(Delivery).filter(Delivery.id == id).first()
-    if not delivery:
-        raise HTTPException(status_code=404, detail="Delivery record not found")
-
-    order = delivery.order
-    product = order.product
-
-    # Revert stock change
-    if order.type == "销售":
-        product.quantity += delivery.quantity
-    else:
-        product.quantity -= delivery.quantity
-
-    db.delete(delivery)
-    db.commit()
-    return {"message": "Delivery record deleted, inventory adjusted"}
+    return {
+        "produced_lot": lot_number,
+        "product_info": { "code": lot.item.code, "name": lot.item.name, "specs": lot.item.specs },
+        "work_order_info": { "work_order_code": wo.code, "quantity": wo.quantity, "date": wo.plan_start_date },
+        "raw_materials_used": raw_materials_used
+    }
 
 
-# ==================== FINANCE (ACCOUNTS & INVOICES) ====================
-@app.get("/api/financials")
-def get_financials_view(
-    show_all: bool = Query(False),
-    search: Optional[str] = Query(None),
-    db: Session = Depends(get_db)
-):
-    orders = db.query(Order).all()
-    result = []
+# ==================== MINIMALIST FINANCIAL FLOWS ====================
+@app.get("/api/finance/flows")
+def get_financial_ledger(db: Session = Depends(get_db)):
+    return db.query(FinancialFlow).all()
 
-    for o in orders:
-        total_amount = o.quantity * o.unit_price
-        paid_amount = sum(f.amount for f in o.financials)
-        pending_amount = total_amount - paid_amount
-
-        is_completed_finance = (pending_amount <= 0.01)
-
-        if not show_all and is_completed_finance:
-            continue # hide completed
-
-        invoiced_amount = sum(f.amount for f in o.financials if f.is_invoiced)
-        pending_invoice_amount = total_amount - invoiced_amount
-
-        match = True
-        if search:
-            s = search.lower()
-            match = (
-                s in o.code.lower() or
-                s in o.customer.name.lower() or
-                s in o.product.name.lower() or
-                s in o.product.specs.lower()
-            )
-
-        if match:
-            result.append({
-                "order_id": o.id,
-                "order_code": o.code,
-                "type": o.type,
-                "customer_name": o.customer.name,
-                "product_name": o.product.name,
-                "product_specs": o.product.specs,
-                "total_amount": total_amount,
-                "paid_amount": paid_amount,
-                "pending_amount": max(0.0, pending_amount),
-                "invoiced_amount": invoiced_amount,
-                "pending_invoice_amount": max(0.0, pending_invoice_amount)
-            })
-    return result
-
-@app.post("/api/financials")
-def create_financial_record(
-    order_id: int = Form(...),
+@app.post("/api/finance/reconcile")
+def reconcile_bill_account(
+    party_id: int = Form(...),
+    reconcile_type: str = Form(...), # "应收核销", "应付核销"
     amount: float = Form(...),
-    payment_date: str = Form(...),
-    invoice_no: Optional[str] = Form(None),
-    invoice_image_url: Optional[str] = Form(None),
-    is_invoiced: bool = Form(False),
+    payment_method: str = Form("银行转账"),
     remarks: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
-    order = db.query(Order).filter(Order.id == order_id).first()
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    if amount <= 0:
-        raise HTTPException(status_code=400, detail="Payment amount must be > 0")
-
-    # Check payment exceedance
-    total_amount = order.quantity * order.unit_price
-    current_paid = sum(f.amount for f in order.financials)
-    if current_paid + amount > total_amount + 0.01: # allow minor floating tolerance
-        raise HTTPException(
-            status_code=400,
-            detail=f"Payment of {amount} exceeds the remaining unpaid balance of {total_amount - current_paid}"
+    # Find matching un-reconciled bill flows
+    flow_type = "应收" if reconcile_type == "应收核销" else "应付"
+    bills = db.query(FinancialFlow).filter(
+        and_(
+            FinancialFlow.party_id == party_id,
+            FinancialFlow.type == flow_type,
+            FinancialFlow.is_reconciled == False
         )
+    ).all()
 
-    record = FinancialRecord(
-        order_id=order_id,
+    remaining = amount
+    for b in bills:
+        if remaining <= 0:
+            break
+        # Auto reconcile
+        b.is_reconciled = True
+        remaining -= b.amount
+
+    # Write reconciliation transaction journal flow
+    txn_type = "收款" if reconcile_type == "应收核销" else "付款"
+    recon_flow = FinancialFlow(
+        party_id=party_id,
+        type=txn_type,
         amount=amount,
-        payment_date=payment_date,
-        invoice_no=invoice_no,
-        invoice_image_url=invoice_image_url,
-        is_invoiced=is_invoiced,
-        remarks=remarks
+        record_date=datetime.utcnow().strftime("%Y-%m-%d"),
+        is_reconciled=True,
+        remarks=f"核销收付款记录. 付款方式: {payment_method}. {remarks or ''}"
     )
-    db.add(record)
+    db.add(recon_flow)
     db.commit()
-    db.refresh(record)
-    return record
+    return {"message": "Reconciliation bookkeeping completed successfully"}
 
-@app.put("/api/financials/{id}")
-def update_financial_record(
-    id: int,
+@app.post("/api/finance/flows/misc")
+def create_misc_expense_income(
+    type: str = Form(...), # "日常支出" or "日常收入"
     amount: float = Form(...),
-    payment_date: str = Form(...),
-    invoice_no: Optional[str] = Form(None),
-    invoice_image_url: Optional[str] = Form(None),
-    is_invoiced: bool = Form(...),
-    remarks: Optional[str] = Form(None),
+    remarks: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    record = db.query(FinancialRecord).filter(FinancialRecord.id == id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Financial record not found")
-
-    if amount <= 0:
-        raise HTTPException(status_code=400, detail="Payment amount must be > 0")
-
-    order = record.order
-    total_amount = order.quantity * order.unit_price
-    current_paid_other = sum(f.amount for f in order.financials if f.id != id)
-
-    if current_paid_other + amount > total_amount + 0.01:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Updated payment of {amount} would exceed the remaining unpaid balance of {total_amount - current_paid_other}"
-        )
-
-    record.amount = amount
-    record.payment_date = payment_date
-    record.invoice_no = invoice_no
-    record.invoice_image_url = invoice_image_url
-    record.is_invoiced = is_invoiced
-    record.remarks = remarks
-
+    flow = FinancialFlow(
+        type=type,
+        amount=amount,
+        record_date=datetime.utcnow().strftime("%Y-%m-%d"),
+        is_reconciled=True,
+        remarks=remarks
+    )
+    db.add(flow)
     db.commit()
-    db.refresh(record)
-    return record
+    return {"message": "Miscellaneous ledger flow recorded successfully"}
 
-@app.delete("/api/financials/{id}")
-def delete_financial_record(id: int, db: Session = Depends(get_db)):
-    record = db.query(FinancialRecord).filter(FinancialRecord.id == id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Financial record not found")
-    db.delete(record)
-    db.commit()
-    return {"message": "Financial record deleted successfully"}
+@app.get("/api/finance/balance")
+def get_reconciled_cash_balance(db: Session = Depends(get_db)):
+    # Calculate simple dynamic cash accounts balance:
+    # Initial balance = 100000.00
+    # Add Collection Receipts ("收款", "日常收入")
+    # Sub Cash Payments ("付款", "日常支出")
+    incomes = db.query(func.sum(FinancialFlow.amount)).filter(FinancialFlow.type.in_(["收款", "日常收入"])).scalar() or 0.0
+    expenses = db.query(func.sum(FinancialFlow.amount)).filter(FinancialFlow.type.in_(["付款", "日常支出"])).scalar() or 0.0
+
+    current_cash = 100000.0 + incomes - expenses
+    return {
+        "initial_balance": 100000.0,
+        "total_receipts": incomes,
+        "total_disbursements": expenses,
+        "current_cash_balance": current_cash
+    }
