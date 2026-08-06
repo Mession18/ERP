@@ -2,7 +2,7 @@ import unittest
 from fastapi.testclient import TestClient
 from backend.main import app
 from backend.database import SessionLocal
-from backend.models import Product, Customer, Order, Delivery, FinancialRecord
+from backend.models import Party, Item, BOM, BOMItem, LotRecord, BinStock, InventoryLedger, Order, WorkOrder, ProductionIssueLog, FinancialFlow
 
 class TestERPBackend(unittest.TestCase):
     def setUp(self):
@@ -10,122 +10,193 @@ class TestERPBackend(unittest.TestCase):
         # Clear database records to ensure repeatable test cases
         db = SessionLocal()
         try:
-            db.query(FinancialRecord).delete()
-            db.query(Delivery).delete()
+            db.query(FinancialFlow).delete()
+            db.query(ProductionIssueLog).delete()
+            db.query(WorkOrder).delete()
             db.query(Order).delete()
-            db.query(Product).delete()
-            db.query(Customer).delete()
+            db.query(InventoryLedger).delete()
+            db.query(BinStock).delete()
+            db.query(LotRecord).delete()
+            db.query(BOMItem).delete()
+            db.query(BOM).delete()
+            db.query(Item).delete()
+            db.query(Party).delete()
             db.commit()
         finally:
             db.close()
 
     def test_flow(self):
-        # 1. Test basic root
-        response = self.client.get("/")
+        # 1. Test basic root and health check
+        response = self.client.get("/api")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("Backend is running", response.json()["message"])
+        self.assertIn("online", response.json()["message"])
 
-        # 2. Test create product (Inventory)
-        prod_data = {
-            "name": "测试商品A",
-            "specs": "100g/盒",
-            "quantity": "50",
-            "remarks": "这是一条备注",
-            "process_info": "生产工艺说明..."
+        # 2. Create Parties (往来单位)
+        party_data = {
+            "name": "宏达化工材料厂",
+            "is_customer": "false",
+            "is_supplier": "true",
+            "credit_limit": "50000.0",
+            "payment_term": "月结30天",
+            "contacts_json": '[{"name": "李经理", "phone": "13911223344", "role": "业务经理"}]',
+            "addresses_json": '[{"address": "宏达工业区8号", "type": "发货地"}]'
         }
-        response = self.client.post("/api/products", data=prod_data)
+        response = self.client.post("/api/parties", data=party_data)
         self.assertEqual(response.status_code, 200)
-        prod = response.json()
-        self.assertEqual(prod["name"], "测试商品A")
-        self.assertEqual(prod["code"], "PROD-0001") # auto code
-        self.assertEqual(prod["status"], "上架")
-        prod_id = prod["id"]
+        party = response.json()
+        self.assertEqual(party["code"], "PART-0001")
+        party_id = party["id"]
 
-        # 3. Test create customer (buyer)
-        cust_data = {
-            "type": "买家",
-            "name": "北京科技公司",
-            "contact_person": "张经理",
-            "contact_phone": "13800138000",
-            "address": "北京市海淀区科技路"
+        # 3. Create Items (物料档案)
+        # Raw material
+        item_raw_data = {
+            "name": "聚氯乙烯颗粒",
+            "specs": "工业级-100kg/袋",
+            "unit": "kg",
+            "type": "原材料",
+            "min_safety_stock": "500",
+            "max_safety_stock": "10000",
+            "remarks": "注塑基础原料"
         }
-        response = self.client.post("/api/customers", data=cust_data)
+        response = self.client.post("/api/items", data=item_raw_data)
         self.assertEqual(response.status_code, 200)
-        cust = response.json()
-        self.assertEqual(cust["name"], "北京科技公司")
-        self.assertEqual(cust["code"], "CUST-0001")
-        cust_id = cust["id"]
+        item_raw = response.json()
+        raw_id = item_raw["id"]
 
-        # 4. Test create order (Sales type, qty=10, price=15.5)
+        # Finished Product
+        item_prod_data = {
+            "name": "高压耐磨软管",
+            "specs": "DN15-防爆型",
+            "unit": "米",
+            "type": "成品",
+            "min_safety_stock": "100",
+            "max_safety_stock": "2000"
+        }
+        response = self.client.post("/api/items", data=item_prod_data)
+        self.assertEqual(response.status_code, 200)
+        item_prod = response.json()
+        prod_id = item_prod["id"]
+
+        # 4. Create Lot & Stock levels (批次与入库)
+        lot_data = {
+            "item_id": str(raw_id),
+            "lot_number": "RAW-PVC-20260805-SUPP01",
+            "supplier_id": str(party_id)
+        }
+        response = self.client.post("/api/lots", data=lot_data)
+        self.assertEqual(response.status_code, 200)
+        lot = response.json()
+        lot_id = lot["id"]
+
+        # Add physical stock into target bin (Available warehouse)
+        stock_data = {
+            "warehouse_type": "Available",
+            "zone": "ZoneA",
+            "shelf": "Shelf03",
+            "tier": "Tier2",
+            "bin_position": "Bin05",
+            "item_id": str(raw_id),
+            "lot_id": str(lot_id),
+            "quantity_delta": "2000.0",
+            "movement_type": "采购入库",
+            "reference_doc_id": "PO-20260801"
+        }
+        response = self.client.post("/api/warehouses/bins", data=stock_data)
+        self.assertEqual(response.status_code, 200)
+
+        # 5. Create BOM formulation
+        bom_data = {
+            "parent_item_id": str(prod_id),
+            "version": "V1.0",
+            "children_json": '[{"child_item_id": ' + str(raw_id) + ', "standard_quantity": 1.2, "scrap_rate": 0.02}]'
+        }
+        response = self.client.post("/api/boms", data=bom_data)
+        self.assertEqual(response.status_code, 200)
+
+        # 6. Create Work Order (生产工单)
+        wo_data = {
+            "target_item_id": str(prod_id),
+            "quantity": "500.0",
+            "plan_start_date": "2026-08-05",
+            "plan_end_date": "2026-08-10"
+        }
+        response = self.client.post("/api/work_orders", data=wo_data)
+        self.assertEqual(response.status_code, 200)
+        wo = response.json()
+        wo_id = wo["id"]
+
+        # 7. Issue Materials (领料与超领)
+        # Standard issue:Moves 600kg from Available to LineSide
+        issue_data = {
+            "type": "标准领料",
+            "item_id": str(raw_id),
+            "lot_id": str(lot_id),
+            "quantity": "600.0"
+        }
+        response = self.client.post(f"/api/work_orders/{wo_id}/issue", data=issue_data)
+        self.assertEqual(response.status_code, 200)
+
+        # Excess issue with forced scrap reason
+        excess_data = {
+            "type": "超领",
+            "item_id": str(raw_id),
+            "lot_id": str(lot_id),
+            "quantity": "50.0",
+            "scrap_reason": "挤出机段温异常偏高造成初始烧胶报废"
+        }
+        response = self.client.post(f"/api/work_orders/{wo_id}/issue", data=excess_data)
+        self.assertEqual(response.status_code, 200)
+
+        # Excess issue WITHOUT forced scrap reason must FAIL
+        excess_data_fail = {
+            "type": "超领",
+            "item_id": str(raw_id),
+            "lot_id": str(lot_id),
+            "quantity": "20.0"
+        }
+        response = self.client.post(f"/api/work_orders/{wo_id}/issue", data=excess_data_fail)
+        self.assertEqual(response.status_code, 400)
+
+        # 8. Complete Work Order & verify consumption reconciliation
+        # Standard consumption = 500成品 * 1.2标准 = 600kg. Actual consumed = 600 standard + 50 excess = 650kg.
+        response = self.client.get(f"/api/work_orders/{wo_id}/consumption")
+        self.assertEqual(response.status_code, 200)
+        recon_list = response.json()
+        self.assertEqual(len(recon_list), 1)
+        self.assertEqual(recon_list[0]["actual_consumed"], 650.0)
+
+        # 9. Test forward and backward traceability chain loops
+        response = self.client.get("/api/traceability/forward", params={"lot_number": "RAW-PVC-20260805-SUPP01"})
+        self.assertEqual(response.status_code, 200)
+        forward = response.json()
+        self.assertEqual(forward["input_lot"], "RAW-PVC-20260805-SUPP01")
+
+        # 10. Finish order and trigger passive billing AR/AP
         order_data = {
-            "type": "销售",
-            "customer_id": str(cust_id),
-            "product_id": str(prod_id),
-            "quantity": "10",
-            "unit_price": "15.5",
-            "order_date": "2024-05-01",
-            "delivery_date": "2024-05-15"
+            "type": "采购",
+            "party_id": str(party_id),
+            "item_id": str(raw_id),
+            "quantity": "100",
+            "unit_price": "2.5",
+            "order_date": "2026-08-05",
+            "delivery_date": "2026-08-15"
         }
         response = self.client.post("/api/orders", data=order_data)
         self.assertEqual(response.status_code, 200)
         order = response.json()
-        self.assertEqual(order["code"], "ORD-0001")
-        self.assertEqual(order["status"], "进行中")
         order_id = order["id"]
 
-        # 5. Check off-shelf (下架) constraint: must FAIL because there's an ongoing order
-        response = self.client.put(f"/api/products/{prod_id}/status", data={"status": "下架"})
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("ongoing orders", response.json()["detail"])
-
-        # 6. Check product deletion constraint: must FAIL because it's referenced by an order
-        response = self.client.delete(f"/api/products/{prod_id}")
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("associated orders", response.json()["detail"])
-
-        # 7. Check customer deletion constraint: must FAIL because of related order
-        response = self.client.delete(f"/api/customers/{cust_id}")
-        self.assertEqual(response.status_code, 400)
-
-        # 8. Test deliver items: cannot exceed pending quantity (which is 10)
-        del_data = {
-            "order_id": str(order_id),
-            "quantity": "12", # exceeds pending 10
-            "delivery_date": "2024-05-05",
-            "remarks": "送货日志"
-        }
-        response = self.client.post("/api/deliveries", data=del_data)
-        self.assertEqual(response.status_code, 400)
-
-        # 9. Deliver valid quantity: 6 items (sales reduces product stock from 50 to 44)
-        del_data["quantity"] = "6"
-        response = self.client.post("/api/deliveries", data=del_data)
+        # Approve and complete
+        response = self.client.put(f"/api/orders/{order_id}/status", data={"status": "已完成"})
         self.assertEqual(response.status_code, 200)
 
-        # Verify product quantity decreased
-        response = self.client.get(f"/api/products/{prod_id}")
-        self.assertEqual(response.json()["quantity"], 44)
-
-        # 10. Financial record: pay 100.0 (total is 10 * 15.5 = 155.0)
-        fin_data = {
-            "order_id": str(order_id),
-            "amount": "100.0",
-            "payment_date": "2024-05-06",
-            "is_invoiced": "true",
-            "invoice_no": "INV-2024001",
-            "remarks": "首笔付款"
-        }
-        response = self.client.post("/api/financials", data=fin_data)
+        # Check financial flow auto-created passively!
+        response = self.client.get("/api/finance/flows")
         self.assertEqual(response.status_code, 200)
-
-        # Pay too much (e.g. 100 + 60 = 160, total is 155) -> must fail
-        fin_data2 = {
-            "order_id": str(order_id),
-            "amount": "60.0",
-            "payment_date": "2024-05-07"
-        }
-        response = self.client.post("/api/financials", data=fin_data2)
-        self.assertEqual(response.status_code, 400)
+        flows = response.json()
+        self.assertEqual(len(flows), 1)
+        self.assertEqual(flows[0]["type"], "应付")
+        self.assertEqual(flows[0]["amount"], 250.0) # 100 * 2.5 = 250
 
 if __name__ == "__main__":
     unittest.main()
